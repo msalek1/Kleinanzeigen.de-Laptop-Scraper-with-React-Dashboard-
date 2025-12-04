@@ -1,0 +1,75 @@
+# Kleinanzeigen Notebook Scraper
+# Docker Compose configuration for full-stack deployment
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    container_name: kleinanzeigen-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kleinanzeigen
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+      POSTGRES_DB: kleinanzeigen
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kleinanzeigen -d kleinanzeigen"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - kleinanzeigen-network
+
+  # Flask Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kleinanzeigen-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: production
+      SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
+      DATABASE_URL: postgresql+psycopg2://kleinanzeigen:${DB_PASSWORD:-changeme}@db:5432/kleinanzeigen
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000,http://frontend:5173
+      SCRAPER_BASE_URL: https://www.kleinanzeigen.de/s-notebooks/c278
+      SCRAPER_PAGE_LIMIT: 3
+      SCRAPER_DELAY_SECONDS: 5.0
+    ports:
+      - "5000:5000"
+    networks:
+      - kleinanzeigen-network
+    command: /bin/bash /app/start.sh
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: kleinanzeigen-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:5000/api/v1
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - kleinanzeigen-network
+    command: npm run dev -- --host
+
+networks:
+  kleinanzeigen-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
