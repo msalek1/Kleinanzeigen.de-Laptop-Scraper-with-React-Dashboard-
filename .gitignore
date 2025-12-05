@@ -76,3 +76,10 @@ scraped_data/
 
 # Docker
 .docker/
+
+# AGENTs
+*.agent
+*.agent.backup
+.agents/
+.agent
+gemini.md
