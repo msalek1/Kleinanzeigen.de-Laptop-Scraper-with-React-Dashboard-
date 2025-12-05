@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { X, ExternalLink, MapPin, Tag, Calendar, Hash, TrendingDown, TrendingUp, Minus, Heart } from 'lucide-react'
+import { X, ExternalLink, MapPin, Tag, Calendar, Hash, TrendingDown, TrendingUp, Minus, Heart, Share2 } from 'lucide-react'
 import { Listing } from '../services/api'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useFavorites } from '../hooks/useFavorites'
@@ -75,7 +75,14 @@ export default function ListingModal({ listing, isOpen, onClose }: ListingModalP
     }
   }, [listing, toggleFavorite])
 
-  if (!listing) return null
+  const handleShareClick = useCallback(() => {
+    if (!listing) return
+    const text = `Check out this notebook: ${listing.title} - ${formatPrice(listing.price_eur, listing.price_negotiable)}`
+    const url = `https://wa.me/?text=${encodeURIComponent(text + ' ' + listing.url)}`
+    window.open(url, '_blank')
+  }, [listing])
+
+  if (!isOpen || !listing) return null
 
   return (
     <AnimatePresence>
@@ -271,12 +278,19 @@ export default function ListingModal({ listing, isOpen, onClose }: ListingModalP
             </div>
             
             {/* Footer */}
-            <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50">
+            <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 flex gap-3">
+              <button
+                onClick={handleShareClick}
+                className="inline-flex items-center justify-center gap-2 px-6 py-3 bg-green-500 hover:bg-green-600 text-white rounded-xl font-semibold transition-colors"
+              >
+                <Share2 className="w-4 h-4" />
+                Share via WhatsApp
+              </button>
               <a
                 href={listing.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-2 w-full px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-semibold transition-colors"
+                className="flex-1 inline-flex items-center justify-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-xl font-semibold transition-colors"
               >
                 View on Kleinanzeigen
                 <ExternalLink className="w-4 h-4" />

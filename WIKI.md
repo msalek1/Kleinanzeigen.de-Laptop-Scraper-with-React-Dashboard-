@@ -138,12 +138,13 @@ Playwright + BeautifulSoup scraping implementation.
 | `Header` | Sticky navigation and branding with slide-down entry |
 | `FilterBar` | Search/filter controls with expandable animation |
 | `ListingCard` | Individual listing display with hover/tap animations |
-| `ListingGrid` | Staggered animated grid of listing cards |
-| `Pagination` | Page navigation |
-| `StatsPanel` | Aggregate statistics |
-| `ListingModal` | Full listing detail modal with price history |
+| `ListingGrid` | Staggered animated grid with **Infinite Scroll** |
+| `ListingModal` | Full details, price history, and **WhatsApp Share** |
+| `OptimizedImage` | Lazy-loading image with blur placeholder |
+| `ErrorBoundary` | Global error handling and fallback UI |
 | `ScraperProgressPanel` | Real-time scraper progress display |
 | `PriceAlertModal` | Price alert management |
+| `StatsPanel` | Aggregate statistics |
 
 ### Services
 
@@ -159,6 +160,8 @@ Playwright + BeautifulSoup scraping implementation.
 | `useFavorites` | `src/hooks/useFavorites.ts` | Manage favorite listings in localStorage |
 | `usePriceAlerts` | `src/hooks/useFavorites.ts` | Manage price alerts in localStorage |
 | `useScraperSSE` | `src/hooks/useScraperSSE.ts` | Subscribe to real-time scraper progress via SSE |
+| `useDebounce` | `src/hooks/useDebounce.ts` | Debounce search inputs to reduce API calls |
+| `useInfiniteScroll` | `src/hooks/useInfiniteScroll.ts` | Handle scroll-based pagination |
 
 ---
 
@@ -196,8 +199,28 @@ interface ScraperProgress {
 **Features:**
 - Full-screen modal with large image display
 - Complete listing metadata (title, price, location, condition)
-- Price history chart (using Recharts)
-- Price trend indicator (up/down/stable)
+- **Price History Chart:** Visualizes price changes over time using Recharts.
+- **Social Sharing:** One-click sharing via WhatsApp.
+- **Favorites & Alerts:** Toggle favorites and set price alerts directly from the modal.
+
+---
+
+## Medium-Priority Features (2025)
+
+### 1. Progressive Web App (PWA)
+The application is fully PWA-compliant, allowing users to install it as a native-like app on mobile and desktop devices.
+- **Manifest:** `manifest.json` defines app identity, icons, and theme colors.
+- **Service Worker:** Caches static assets for offline capability and faster load times.
+- **Installable:** Browser prompts for installation on supported devices.
+
+### 2. Performance Optimizations
+- **Lazy Loading:** Images are loaded only when they enter the viewport using `OptimizedImage` and Intersection Observer.
+- **Debouncing:** Search input is debounced (300ms) to prevent excessive API calls during typing.
+- **Infinite Scroll:** Replaces traditional pagination for a seamless browsing experience.
+
+### 3. Error Handling
+- **Error Boundary:** A global `ErrorBoundary` component catches React rendering errors and displays a user-friendly fallback UI instead of crashing the entire app.
+
 - Favorite toggle button
 - External link to original listing
 
