@@ -142,6 +142,68 @@ class Listing(db.Model):
         )
 
 
+class ScraperConfig(db.Model):
+    """
+    Stores scraper configuration settings managed via admin panel.
+    
+    Uses a singleton pattern - only one row should exist (id=1).
+    
+    Attributes:
+        id: Primary key (always 1 for singleton).
+        keywords: Comma-separated search keywords for scraping.
+        city: Target city/location filter.
+        categories: Comma-separated category slugs to scrape.
+        update_interval_minutes: How often to auto-run the scraper (0 = disabled).
+        page_limit: Maximum pages to scrape per run.
+        is_active: Whether auto-scraping is enabled.
+        last_modified: When config was last updated.
+    """
+    
+    __tablename__ = 'scraper_config'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    keywords = db.Column(db.Text, default='notebook,laptop', nullable=False)
+    city = db.Column(db.String(200), default='', nullable=False)
+    categories = db.Column(db.Text, default='c278', nullable=False)  # c278 = notebooks
+    update_interval_minutes = db.Column(db.Integer, default=60, nullable=False)
+    page_limit = db.Column(db.Integer, default=5, nullable=False)
+    is_active = db.Column(db.Boolean, default=False, nullable=False)
+    last_modified = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self) -> str:
+        return f'<ScraperConfig keywords={self.keywords[:30]}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'keywords': self.keywords,
+            'keywords_list': [k.strip() for k in self.keywords.split(',') if k.strip()],
+            'city': self.city,
+            'categories': self.categories,
+            'categories_list': [c.strip() for c in self.categories.split(',') if c.strip()],
+            'update_interval_minutes': self.update_interval_minutes,
+            'page_limit': self.page_limit,
+            'is_active': self.is_active,
+            'last_modified': self.last_modified.isoformat() if self.last_modified else None,
+        }
+    
+    @classmethod
+    def get_config(cls) -> 'ScraperConfig':
+        """
+        Get the singleton config instance, creating it if needed.
+        
+        Returns:
+            ScraperConfig: The configuration instance.
+        """
+        config = cls.query.get(1)
+        if not config:
+            config = cls(id=1)
+            db.session.add(config)
+            db.session.commit()
+        return config
+
+
 class ScraperJob(db.Model):
     """
     Tracks scraper job executions for monitoring and debugging.

@@ -14,7 +14,7 @@ from flask_cors import CORS
 from sqlalchemy import or_
 
 from config import get_config
-from models import db, Listing, ScraperJob
+from models import db, Listing, ScraperJob, ScraperConfig
 from scraper import KleinanzeigenScraper
 
 # Configure logging
@@ -312,7 +312,8 @@ def register_routes(app: Flask):
         Trigger a new scraper job.
         
         Request Body (JSON):
-            page_limit (int): Maximum pages to scrape (default: config value).
+            page_limit (int): Maximum pages to scrape (default: from admin config).
+            use_config (bool): Whether to use admin config for keywords/city/categories.
         
         Returns:
             JSON response with job ID and status.
@@ -323,7 +324,31 @@ def register_routes(app: Flask):
             consider using Celery for background processing.
         """
         data = request.get_json() or {}
-        page_limit = data.get('page_limit', app.config['SCRAPER_PAGE_LIMIT'])
+        
+        # Get admin config for scraper settings
+        admin_config = ScraperConfig.get_config()
+        
+        page_limit = data.get('page_limit', admin_config.page_limit)
+        
+        # Build scraper URL based on admin config
+        base_url = app.config['SCRAPER_BASE_URL']
+        
+        # If city is set in config, modify base URL
+        city_slug = admin_config.city.strip() if admin_config.city else ''
+        category = admin_config.categories.split(',')[0].strip() if admin_config.categories else 'c278'
+        
+        if city_slug:
+            # URL format with city: https://www.kleinanzeigen.de/s-notebooks/berlin/c278
+            base_url = f"https://www.kleinanzeigen.de/s-notebooks/{city_slug}/{category}"
+        else:
+            base_url = f"https://www.kleinanzeigen.de/s-notebooks/{category}"
+        
+        # Add keyword search if configured
+        keywords = admin_config.keywords.strip() if admin_config.keywords else ''
+        if keywords:
+            # URL format with keywords: ...?keywords=thinkpad+laptop
+            keyword_param = keywords.replace(',', '+').replace(' ', '+')
+            base_url = f"{base_url}?keywords={keyword_param}"
         
         # Create job record
         job = ScraperJob(status='running', started_at=datetime.utcnow())
@@ -331,9 +356,9 @@ def register_routes(app: Flask):
         db.session.commit()
         
         try:
-            # Initialize scraper
+            # Initialize scraper with config-based URL
             scraper = KleinanzeigenScraper(
-                base_url=app.config['SCRAPER_BASE_URL'],
+                base_url=base_url,
                 delay_seconds=app.config['SCRAPER_DELAY_SECONDS'],
                 page_limit=page_limit,
                 browser_type=app.config['PLAYWRIGHT_BROWSER'],
@@ -412,6 +437,118 @@ def register_routes(app: Flask):
         """
         job = ScraperJob.query.get_or_404(job_id)
         return jsonify({'data': job.to_dict()})
+    
+    # Admin config endpoints
+    @app.route('/api/v1/admin/config', methods=['GET'])
+    @app.route('/api/v1/admin/config/', methods=['GET'])
+    def get_admin_config():
+        """
+        Get current scraper configuration.
+        
+        Returns:
+            JSON response with scraper configuration settings.
+        """
+        config = ScraperConfig.get_config()
+        return jsonify({'data': config.to_dict()})
+    
+    @app.route('/api/v1/admin/config', methods=['PUT'])
+    @app.route('/api/v1/admin/config/', methods=['PUT'])
+    def update_admin_config():
+        """
+        Update scraper configuration.
+        
+        Request Body (JSON):
+            keywords (str): Comma-separated search keywords.
+            city (str): Target city filter.
+            categories (str): Comma-separated category codes.
+            update_interval_minutes (int): Auto-update interval (0 = disabled).
+            page_limit (int): Max pages to scrape per run.
+            is_active (bool): Enable/disable auto-scraping.
+        
+        Returns:
+            JSON response with updated configuration.
+        
+        Note:
+            In production, this endpoint should require admin authentication.
+        """
+        data = request.get_json() or {}
+        config = ScraperConfig.get_config()
+        
+        # Update fields if provided
+        if 'keywords' in data:
+            config.keywords = data['keywords'].strip()
+        if 'city' in data:
+            config.city = data['city'].strip()
+        if 'categories' in data:
+            config.categories = data['categories'].strip()
+        if 'update_interval_minutes' in data:
+            interval = int(data['update_interval_minutes'])
+            if interval < 0:
+                return jsonify({'error': 'Invalid interval'}), 400
+            config.update_interval_minutes = interval
+        if 'page_limit' in data:
+            limit = int(data['page_limit'])
+            if limit < 1 or limit > 50:
+                return jsonify({'error': 'Page limit must be between 1 and 50'}), 400
+            config.page_limit = limit
+        if 'is_active' in data:
+            config.is_active = bool(data['is_active'])
+        
+        db.session.commit()
+        logger.info(f"Admin config updated: {config.to_dict()}")
+        
+        return jsonify({
+            'data': config.to_dict(),
+            'message': 'Configuration updated successfully'
+        })
+    
+    @app.route('/api/v1/admin/categories', methods=['GET'])
+    @app.route('/api/v1/admin/categories/', methods=['GET'])
+    def get_available_categories():
+        """
+        Get list of available Kleinanzeigen categories for notebooks/electronics.
+        
+        Returns:
+            JSON response with predefined category options.
+        """
+        # Predefined categories relevant to notebook scraping
+        categories = [
+            {'code': 'c278', 'name': 'Notebooks', 'description': 'Notebook/Laptop computers'},
+            {'code': 'c225', 'name': 'PCs', 'description': 'Desktop computers'},
+            {'code': 'c285', 'name': 'Tablets & Reader', 'description': 'Tablets and E-Readers'},
+            {'code': 'c161', 'name': 'Elektronik', 'description': 'All electronics'},
+            {'code': 'c228', 'name': 'PC Zubehör & Software', 'description': 'PC accessories and software'},
+        ]
+        return jsonify({'data': categories})
+    
+    @app.route('/api/v1/admin/cities', methods=['GET'])
+    @app.route('/api/v1/admin/cities/', methods=['GET'])
+    def get_available_cities():
+        """
+        Get list of major German cities for location filtering.
+        
+        Returns:
+            JSON response with predefined city options.
+        """
+        # Major German cities for filtering
+        cities = [
+            {'slug': '', 'name': 'Alle (Deutschland-weit)', 'region': ''},
+            {'slug': 'berlin', 'name': 'Berlin', 'region': 'Berlin'},
+            {'slug': 'hamburg', 'name': 'Hamburg', 'region': 'Hamburg'},
+            {'slug': 'muenchen', 'name': 'München', 'region': 'Bayern'},
+            {'slug': 'koeln', 'name': 'Köln', 'region': 'Nordrhein-Westfalen'},
+            {'slug': 'frankfurt-am-main', 'name': 'Frankfurt am Main', 'region': 'Hessen'},
+            {'slug': 'stuttgart', 'name': 'Stuttgart', 'region': 'Baden-Württemberg'},
+            {'slug': 'duesseldorf', 'name': 'Düsseldorf', 'region': 'Nordrhein-Westfalen'},
+            {'slug': 'leipzig', 'name': 'Leipzig', 'region': 'Sachsen'},
+            {'slug': 'dortmund', 'name': 'Dortmund', 'region': 'Nordrhein-Westfalen'},
+            {'slug': 'essen', 'name': 'Essen', 'region': 'Nordrhein-Westfalen'},
+            {'slug': 'bremen', 'name': 'Bremen', 'region': 'Bremen'},
+            {'slug': 'dresden', 'name': 'Dresden', 'region': 'Sachsen'},
+            {'slug': 'hannover', 'name': 'Hannover', 'region': 'Niedersachsen'},
+            {'slug': 'nuernberg', 'name': 'Nürnberg', 'region': 'Bayern'},
+        ]
+        return jsonify({'data': cities})
     
     # Error handlers
     @app.errorhandler(400)

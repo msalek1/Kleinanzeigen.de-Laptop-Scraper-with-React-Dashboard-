@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Laptop, BarChart3 } from 'lucide-react'
+import { Laptop, BarChart3, Settings } from 'lucide-react'
 
 /**
  * Application header with navigation and branding.
@@ -30,6 +30,13 @@ export default function Header() {
             >
               <BarChart3 className="w-4 h-4" />
               Stats
+            </Link>
+            <Link
+              to="/admin"
+              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-primary-600 dark:hover:text-primary-400 transition-colors"
+            >
+              <Settings className="w-4 h-4" />
+              Admin
             </Link>
           </nav>
         </div>

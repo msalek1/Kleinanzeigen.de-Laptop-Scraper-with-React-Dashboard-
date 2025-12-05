@@ -99,6 +99,54 @@ export interface ApiError {
   originalError?: unknown
 }
 
+// Admin config types
+export interface ScraperConfig {
+  id: number
+  keywords: string
+  keywords_list: string[]
+  city: string
+  categories: string
+  categories_list: string[]
+  update_interval_minutes: number
+  page_limit: number
+  is_active: boolean
+  last_modified: string | null
+}
+
+export interface ScraperConfigResponse {
+  data: ScraperConfig
+  message?: string
+}
+
+export interface ScraperConfigUpdate {
+  keywords?: string
+  city?: string
+  categories?: string
+  update_interval_minutes?: number
+  page_limit?: number
+  is_active?: boolean
+}
+
+export interface Category {
+  code: string
+  name: string
+  description: string
+}
+
+export interface City {
+  slug: string
+  name: string
+  region: string
+}
+
+export interface CategoriesResponse {
+  data: Category[]
+}
+
+export interface CitiesResponse {
+  data: City[]
+}
+
 /**
  * Create and configure the axios instance for API calls.
  */
@@ -220,6 +268,43 @@ export const scraperApi = {
 export const healthApi = {
   check: async (): Promise<{ status: string; timestamp: string }> => {
     const response = await apiClient.get('/health')
+    return response.data
+  },
+}
+
+/**
+ * API functions for admin configuration
+ */
+export const adminApi = {
+  /**
+   * Get current scraper configuration.
+   */
+  getConfig: async (): Promise<ScraperConfigResponse> => {
+    const response = await apiClient.get<ScraperConfigResponse>('/admin/config')
+    return response.data
+  },
+  
+  /**
+   * Update scraper configuration.
+   */
+  updateConfig: async (config: ScraperConfigUpdate): Promise<ScraperConfigResponse> => {
+    const response = await apiClient.put<ScraperConfigResponse>('/admin/config', config)
+    return response.data
+  },
+  
+  /**
+   * Get available categories for scraping.
+   */
+  getCategories: async (): Promise<CategoriesResponse> => {
+    const response = await apiClient.get<CategoriesResponse>('/admin/categories')
+    return response.data
+  },
+  
+  /**
+   * Get available cities for filtering.
+   */
+  getCities: async (): Promise<CitiesResponse> => {
+    const response = await apiClient.get<CitiesResponse>('/admin/cities')
     return response.data
   },
 }

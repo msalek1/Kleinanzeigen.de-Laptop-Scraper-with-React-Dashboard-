@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, ProgrammingError, OperationalError
 
 from app import create_app
-from models import db
+from models import db, ScraperConfig
 
 
 def wait_for_db(app, max_retries=30, delay=1):
@@ -28,6 +28,32 @@ def wait_for_db(app, max_retries=30, delay=1):
                 print(f"Waiting for database... ({i+1}/{max_retries})")
                 time.sleep(delay)
         return False
+
+
+def seed_default_config(app):
+    """Seed default scraper configuration if not exists."""
+    with app.app_context():
+        try:
+            config = ScraperConfig.query.get(1)
+            if not config:
+                print("Creating default scraper configuration...")
+                config = ScraperConfig(
+                    id=1,
+                    keywords='notebook,laptop',
+                    city='',
+                    categories='c278',
+                    update_interval_minutes=60,
+                    page_limit=5,
+                    is_active=False
+                )
+                db.session.add(config)
+                db.session.commit()
+                print("Default scraper configuration created")
+            else:
+                print("Scraper configuration already exists")
+        except Exception as e:
+            print(f"Note: Could not seed config (may already exist): {e}")
+            db.session.rollback()
 
 
 def init_database(app):
@@ -79,6 +105,7 @@ def main():
         sys.exit(1)
     
     init_database(app)
+    seed_default_config(app)
     print("Database initialization complete")
     sys.exit(0)
 
