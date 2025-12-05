@@ -8,6 +8,11 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 
 // Types for API responses
+export interface PriceHistoryEntry {
+  price: number | null
+  recorded_at: string
+}
+
 export interface Listing {
   id: number
   external_id: string
@@ -26,6 +31,7 @@ export interface Listing {
   image_url: string | null
   seller_type: string | null
   search_keywords: string[]
+  price_history?: PriceHistoryEntry[]
 }
 
 export interface PaginationInfo {

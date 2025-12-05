@@ -33,6 +33,7 @@ class Listing(db.Model):
         image_url: URL to the listing's main image.
         seller_type: Private or commercial seller.
         raw_html: Optional raw HTML for debugging (not stored by default).
+        price_history: Relationship to price history records.
     """
     
     __tablename__ = 'listings'
@@ -69,12 +70,18 @@ class Listing(db.Model):
     # Debug field - not populated by default
     raw_html = db.Column(db.Text, nullable=True)
     
+    # Relationship to price history
+    price_history = db.relationship('PriceHistory', backref='listing', lazy='dynamic', cascade='all, delete-orphan')
+    
     def __repr__(self) -> str:
         return f'<Listing {self.external_id}: {self.title[:50]}>'
     
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_price_history: bool = True) -> Dict[str, Any]:
         """
         Convert listing to dictionary for API responses.
+        
+        Args:
+            include_price_history: Whether to include price history data.
         
         Returns:
             Dict containing all listing fields in JSON-serializable format.
@@ -84,7 +91,7 @@ class Listing(db.Model):
         if self.search_keywords:
             keywords_list = [k.strip() for k in self.search_keywords.split(',') if k.strip()]
         
-        return {
+        result = {
             'id': self.id,
             'external_id': self.external_id,
             'url': self.url,
@@ -103,6 +110,13 @@ class Listing(db.Model):
             'seller_type': self.seller_type,
             'search_keywords': keywords_list,
         }
+        
+        # Include price history if requested
+        if include_price_history:
+            history = self.price_history.order_by(PriceHistory.recorded_at.asc()).limit(20).all()
+            result['price_history'] = [h.to_dict() for h in history]
+        
+        return result
     
     @classmethod
     def from_scraped_dict(cls, data: Dict[str, Any]) -> 'Listing':
@@ -149,6 +163,38 @@ class Listing(db.Model):
             image_url=data.get('image_url'),
             seller_type=data.get('seller_type'),
         )
+
+
+class PriceHistory(db.Model):
+    """
+    Tracks price changes for listings over time.
+    
+    Each time a listing's price changes during scraping, a new record
+    is created to track the history.
+    
+    Attributes:
+        id: Primary key.
+        listing_id: Foreign key to the listing.
+        price: Price in cents at this point in time.
+        recorded_at: When this price was recorded.
+    """
+    
+    __tablename__ = 'price_history'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    listing_id = db.Column(db.Integer, db.ForeignKey('listings.id', ondelete='CASCADE'), nullable=False, index=True)
+    price = db.Column(db.Integer, nullable=True)  # Price in cents
+    recorded_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    
+    def __repr__(self) -> str:
+        return f'<PriceHistory listing={self.listing_id} price={self.price}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert price history entry to dictionary."""
+        return {
+            'price': self.price / 100 if self.price else None,
+            'recorded_at': self.recorded_at.isoformat() if self.recorded_at else None,
+        }
 
 
 class ScraperConfig(db.Model):

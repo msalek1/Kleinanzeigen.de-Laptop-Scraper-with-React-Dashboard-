@@ -75,6 +75,29 @@ def apply_migrations(app):
                 db.session.commit()
                 print("search_keywords column added successfully")
             
+            # Migration 2: Create price_history table if it doesn't exist
+            result = db.session.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'price_history'
+                )
+            """))
+            has_price_history = result.scalar()
+            
+            if not has_price_history:
+                print("Creating price_history table...")
+                db.session.execute(text("""
+                    CREATE TABLE price_history (
+                        id SERIAL PRIMARY KEY,
+                        listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+                        price INTEGER,
+                        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+                    )
+                """))
+                db.session.execute(text("CREATE INDEX idx_price_history_listing ON price_history(listing_id)"))
+                db.session.commit()
+                print("price_history table created successfully")
+            
         except Exception as e:
             print(f"Note: Could not apply migrations (may be SQLite or column exists): {e}")
             db.session.rollback()

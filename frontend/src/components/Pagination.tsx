@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { PaginationInfo } from '../services/api'
+import { motion } from 'framer-motion'
 
 interface PaginationProps {
   pagination: PaginationInfo
@@ -44,46 +45,66 @@ export default function Pagination({ pagination, onPageChange }: PaginationProps
   }
   
   return (
-    <div className="flex items-center justify-between mt-8">
-      <p className="text-sm text-gray-600 dark:text-gray-400">
-        Showing page {page} of {total_pages} ({total_items} total listings)
+    <motion.div 
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: 0.2 }}
+      className="flex flex-col sm:flex-row items-center justify-between mt-12 gap-4 border-t border-gray-200 dark:border-gray-800 pt-6"
+    >
+      <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+        Page <span className="text-gray-900 dark:text-white">{page}</span> of {total_pages} <span className="text-gray-300 mx-1">|</span> {total_items} results
       </p>
       
-      <div className="flex items-center gap-1">
-        <button
+      <div className="flex items-center gap-2 bg-white dark:bg-gray-800 p-1 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700">
+        <motion.button
+          whileHover={{ scale: 1.05, backgroundColor: "rgba(0,0,0,0.05)" }}
+          whileTap={{ scale: 0.95 }}
           onClick={() => onPageChange(page - 1)}
           disabled={!has_prev}
-          className="p-2 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="p-2 rounded-xl text-gray-600 dark:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <ChevronLeft className="w-5 h-5" />
-        </button>
+        </motion.button>
         
-        {getPageNumbers().map((pageNum, idx) => (
-          pageNum === 'ellipsis' ? (
-            <span key={`ellipsis-${idx}`} className="px-2 text-gray-500">...</span>
-          ) : (
-            <button
-              key={pageNum}
-              onClick={() => onPageChange(pageNum)}
-              className={`min-w-[40px] h-10 rounded-lg font-medium transition-colors ${
-                pageNum === page
-                  ? 'bg-primary-600 text-white'
-                  : 'border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
-              }`}
-            >
-              {pageNum}
-            </button>
-          )
-        ))}
+        <div className="flex items-center px-2 gap-1">
+            {getPageNumbers().map((pageNum, idx) => (
+            pageNum === 'ellipsis' ? (
+                <span key={`ellipsis-${idx}`} className="px-2 text-gray-400">...</span>
+            ) : (
+                <motion.button
+                    key={pageNum}
+                    onClick={() => onPageChange(pageNum)}
+                    className={`relative w-9 h-9 rounded-lg text-sm font-semibold transition-colors z-10 ${
+                        pageNum === page
+                        ? 'text-white'
+                        : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                    }`}
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.9 }}
+                >
+                    {pageNum === page && (
+                        <motion.div
+                            layoutId="pagination-active"
+                            className="absolute inset-0 bg-primary-600 rounded-lg -z-10 shadow-lg shadow-primary-500/30"
+                            transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                        />
+                    )}
+                    {pageNum}
+                </motion.button>
+            )
+            ))}
+        </div>
         
-        <button
+        <motion.button
+          whileHover={{ scale: 1.05, backgroundColor: "rgba(0,0,0,0.05)" }}
+          whileTap={{ scale: 0.95 }}
           onClick={() => onPageChange(page + 1)}
           disabled={!has_next}
-          className="p-2 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="p-2 rounded-xl text-gray-600 dark:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed"
         >
           <ChevronRight className="w-5 h-5" />
-        </button>
+        </motion.button>
       </div>
-    </div>
+    </motion.div>
   )
 }

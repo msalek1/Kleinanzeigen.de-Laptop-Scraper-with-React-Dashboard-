@@ -23,7 +23,6 @@ import {
 import { 
   adminApi, 
   scraperApi,
-  ScraperConfig, 
   ScraperConfigUpdate, 
   Category, 
   City 
@@ -93,7 +92,7 @@ export default function AdminPage() {
   
   // Timer for elapsed time during scraping
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null
+    let interval: any = null
     if (scrapeStartTime && triggerScraperMutation.isPending) {
       interval = setInterval(() => {
         setElapsedTime(Math.floor((Date.now() - scrapeStartTime.getTime()) / 1000))

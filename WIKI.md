@@ -8,7 +8,7 @@ The Kleinanzeigen Notebook Scraper is a full-stack application that collects, no
 
 **Tech Stack:**
 - **Backend:** Python, Flask, SQLAlchemy, Playwright, BeautifulSoup
-- **Frontend:** React, TypeScript, TailwindCSS, React Query
+- **Frontend:** React, TypeScript, TailwindCSS, Framer Motion, React Query
 - **Database:** PostgreSQL (production) / SQLite (development)
 - **Infrastructure:** Docker, Docker Compose
 
@@ -84,6 +84,7 @@ SQLAlchemy ORM models for data persistence.
 - `Listing` - Scraped notebook listings
 - `ScraperJob` - Job execution tracking
 - `ScraperConfig` - Admin configuration for scraper settings
+- `PriceHistory` - Price change tracking for listings
 
 **Key Fields (Listing):**
 | Field | Type | Description |
@@ -114,6 +115,13 @@ Playwright + BeautifulSoup scraping implementation.
 
 ## Frontend Structure
 
+### UI/UX Enhancements (2025 Design)
+- **Glassmorphism Header:** Sticky header with `backdrop-blur-md` and semi-transparent backgrounds.
+- **Staggered Animations:** `ListingGrid` items cascade in with a slight delay using `framer-motion` variants.
+- **Micro-interactions:** Hover lift, scale effects, and tap feedback on `ListingCard` and buttons.
+- **Smooth Transitions:** `AnimatePresence` used for smooth entry/exit of filter panels and grid items.
+- **Loading States:** Animated spinner and skeleton-like feel for better perceived performance.
+
 ### Pages
 
 | Page | Path | Description |
@@ -126,13 +134,16 @@ Playwright + BeautifulSoup scraping implementation.
 
 | Component | Purpose |
 |-----------|---------|
-| `Layout` | Page wrapper with header/footer |
-| `Header` | Navigation and branding |
-| `FilterBar` | Search and filter controls |
-| `ListingCard` | Individual listing display |
-| `ListingGrid` | Grid of listing cards |
+| `Layout` | Page wrapper with glassmorphism header/footer |
+| `Header` | Sticky navigation and branding with slide-down entry |
+| `FilterBar` | Search/filter controls with expandable animation |
+| `ListingCard` | Individual listing display with hover/tap animations |
+| `ListingGrid` | Staggered animated grid of listing cards |
 | `Pagination` | Page navigation |
 | `StatsPanel` | Aggregate statistics |
+| `ListingModal` | Full listing detail modal with price history |
+| `ScraperProgressPanel` | Real-time scraper progress display |
+| `PriceAlertModal` | Price alert management |
 
 ### Services
 
@@ -140,6 +151,105 @@ Playwright + BeautifulSoup scraping implementation.
 |---------|------|---------|
 | API Client | `src/services/api.ts` | Centralized HTTP calls |
 | React Query Hooks | `src/hooks/useApi.ts` | Data fetching/caching |
+
+### Hooks
+
+| Hook | File | Purpose |
+|------|------|---------|
+| `useFavorites` | `src/hooks/useFavorites.ts` | Manage favorite listings in localStorage |
+| `usePriceAlerts` | `src/hooks/useFavorites.ts` | Manage price alerts in localStorage |
+| `useScraperSSE` | `src/hooks/useScraperSSE.ts` | Subscribe to real-time scraper progress via SSE |
+
+---
+
+## High-Priority Features (2025)
+
+### 1. Real-time Scraper Progress (SSE)
+
+**Backend:**
+- `sse.py` - Server-Sent Events manager with thread-safe queue
+- Endpoint: `GET /api/v1/scraper/jobs/{job_id}/progress`
+- Events: `connected`, `progress`, `complete`, `error`
+
+**Frontend:**
+- `useScraperSSE` hook for subscribing to progress updates
+- `ScraperProgressPanel` component for displaying progress
+- Auto-connects when scraper job is triggered
+
+**Progress Data:**
+```typescript
+interface ScraperProgress {
+  status: 'running' | 'completed' | 'failed'
+  current_keyword: string
+  keyword_index: number
+  total_keywords: number
+  listings_found: number
+  elapsed_seconds: number
+  message: string
+}
+```
+
+### 2. Listing Detail Modal
+
+**Component:** `ListingModal.tsx`
+
+**Features:**
+- Full-screen modal with large image display
+- Complete listing metadata (title, price, location, condition)
+- Price history chart (using Recharts)
+- Price trend indicator (up/down/stable)
+- Favorite toggle button
+- External link to original listing
+
+### 3. Price History Tracking
+
+**Backend:**
+- `PriceHistory` model tracking price changes over time
+- Automatic recording when listing price changes during scrape
+- Stored in `price_history` table with foreign key to `listings`
+
+**Data Structure:**
+```python
+class PriceHistory(db.Model):
+    id: int
+    listing_id: int (FK → listings.id)
+    price_cents: int | null
+    recorded_at: datetime
+```
+
+**API Response:**
+- `price_history` array included in listing responses
+- `price_trend` calculated from last two price points
+
+### 4. Favorites/Watchlist
+
+**Storage:** localStorage (`kleinanzeigen_favorites`)
+
+**Features:**
+- Heart button on listing cards (shows on hover, filled when favorited)
+- Favorites page (`/favorites`) showing all saved listings
+- Badge count in header navigation
+- Toggle favorite from card or modal
+
+**Hook API:**
+```typescript
+const { favorites, isFavorite, toggleFavorite, favoritesCount } = useFavorites()
+```
+
+### 5. Quick Price Alerts
+
+**Storage:** localStorage (`kleinanzeigen_price_alerts`)
+
+**Features:**
+- Bell icon in header opens alert modal
+- Set max price threshold per keyword
+- Notifications when listings match criteria
+- Active alerts count badge
+
+**Hook API:**
+```typescript
+const { alerts, addAlert, removeAlert, checkListingsForAlerts } = usePriceAlerts()
+```
 
 ---
 
@@ -306,6 +416,31 @@ Trigger a new scraper job (admin only).
 GET /api/v1/scraper/jobs/{id}
 ```
 Get status of a specific job.
+
+#### Get Scraper Job Progress (SSE)
+```
+GET /api/v1/scraper/jobs/{id}/progress
+```
+Server-Sent Events stream for real-time job progress.
+
+**Events:**
+- `connected` - Initial connection established
+- `progress` - Job progress update
+- `complete` - Job finished successfully
+- `error` - Job failed with error
+
+**Progress Event Data:**
+```json
+{
+  "status": "running",
+  "current_keyword": "laptop",
+  "keyword_index": 2,
+  "total_keywords": 5,
+  "listings_found": 45,
+  "elapsed_seconds": 30,
+  "message": "Scraping keyword 2/5: laptop"
+}
+```
 
 #### Get Admin Configuration
 ```

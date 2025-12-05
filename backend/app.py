@@ -14,8 +14,9 @@ from flask_cors import CORS
 from sqlalchemy import or_
 
 from config import get_config
-from models import db, Listing, ScraperJob, ScraperConfig
+from models import db, Listing, ScraperJob, ScraperConfig, PriceHistory
 from scraper import KleinanzeigenScraper
+from sse import progress_manager, create_sse_response
 
 # Configure logging
 logging.basicConfig(
@@ -397,6 +398,10 @@ def register_routes(app: Flask):
         db.session.add(job)
         db.session.commit()
         
+        # Track start time for progress
+        import time
+        start_time = time.time()
+        
         try:
             # Track listings by external_id with their keywords
             listings_by_id = {}  # {external_id: {'data': listing_data, 'keywords': set()}}
@@ -407,7 +412,21 @@ def register_routes(app: Flask):
             if not keywords_list:
                 keywords_list = ['']  # Empty string = no keyword filter
             
-            for keyword in keywords_list:
+            total_keywords = len(keywords_list)
+            
+            for idx, keyword in enumerate(keywords_list):
+                # Publish progress via SSE
+                elapsed = time.time() - start_time
+                progress_manager.publish(job.id, {
+                    'status': 'running',
+                    'current_keyword': keyword or 'all',
+                    'keyword_index': idx,
+                    'total_keywords': total_keywords,
+                    'listings_found': len(listings_by_id),
+                    'elapsed_seconds': int(elapsed),
+                    'message': f"Scraping keyword: {keyword or 'all notebooks'}",
+                })
+                
                 # Build URL for this keyword
                 if keyword:
                     # URL encode the keyword (spaces become +)
@@ -461,15 +480,24 @@ def register_routes(app: Flask):
                 listing_data = listing_info['data']
                 keywords_set = listing_info['keywords']
                 keywords_str = ','.join(sorted(keywords_set)) if keywords_set else ''
+                new_price_cents = int(listing_data['price'] * 100) if listing_data['price'] else None
                 
                 existing = Listing.query.filter_by(
                     external_id=ext_id
                 ).first()
                 
                 if existing:
+                    # Track price history if price changed
+                    if existing.price_eur != new_price_cents:
+                        price_entry = PriceHistory(
+                            listing_id=existing.id,
+                            price=new_price_cents
+                        )
+                        db.session.add(price_entry)
+                    
                     # Update existing listing
                     existing.title = listing_data['title']
-                    existing.price_eur = int(listing_data['price'] * 100) if listing_data['price'] else None
+                    existing.price_eur = new_price_cents
                     existing.price_negotiable = listing_data['price_negotiable']
                     existing.location_city = listing_data['city']
                     existing.location_state = listing_data['state']
@@ -490,9 +518,33 @@ def register_routes(app: Flask):
                     new_listing = Listing.from_scraped_dict(listing_data)
                     new_listing.search_keywords = keywords_str
                     db.session.add(new_listing)
+                    db.session.flush()  # Get the ID
+                    
+                    # Add initial price to history
+                    if new_price_cents is not None:
+                        price_entry = PriceHistory(
+                            listing_id=new_listing.id,
+                            price=new_price_cents
+                        )
+                        db.session.add(price_entry)
+                    
                     new_count += 1
             
             db.session.commit()
+            
+            # Publish final progress via SSE
+            elapsed = time.time() - start_time
+            progress_manager.complete(job.id, {
+                'status': 'completed',
+                'current_keyword': 'done',
+                'keyword_index': total_keywords,
+                'total_keywords': total_keywords,
+                'listings_found': len(listings_by_id),
+                'elapsed_seconds': int(elapsed),
+                'message': f'Completed! {new_count} new, {updated_count} updated.',
+                'new_count': new_count,
+                'updated_count': updated_count,
+            })
             
             # Update job status
             job.status = 'completed'
@@ -514,6 +566,20 @@ def register_routes(app: Flask):
             
         except Exception as e:
             logger.error(f"Scraper job {job.id} failed: {e}")
+            
+            # Publish failure via SSE
+            elapsed = time.time() - start_time
+            progress_manager.complete(job.id, {
+                'status': 'failed',
+                'current_keyword': '',
+                'keyword_index': 0,
+                'total_keywords': len(keywords_list) if 'keywords_list' in dir() else 0,
+                'listings_found': len(listings_by_id) if 'listings_by_id' in dir() else 0,
+                'elapsed_seconds': int(elapsed),
+                'message': f'Failed: {str(e)}',
+                'error': str(e),
+            })
+            
             job.status = 'failed'
             job.completed_at = datetime.utcnow()
             job.error_message = str(e)
@@ -537,6 +603,28 @@ def register_routes(app: Flask):
         """
         job = ScraperJob.query.get_or_404(job_id)
         return jsonify({'data': job.to_dict()})
+    
+    @app.route('/api/v1/scraper/jobs/<int:job_id>/progress', methods=['GET'])
+    def get_scraper_progress(job_id: int):
+        """
+        Server-Sent Events endpoint for real-time scraper progress.
+        
+        Args:
+            job_id: Job ID to stream progress for.
+        
+        Returns:
+            SSE stream with progress updates.
+        """
+        job = ScraperJob.query.get_or_404(job_id)
+        
+        # If job is already completed, return final status immediately
+        if job.status in ('completed', 'failed'):
+            return jsonify({
+                'data': job.to_dict(),
+                'completed': True
+            })
+        
+        return create_sse_response(job_id)
     
     # Admin config endpoints
     @app.route('/api/v1/admin/config', methods=['GET'])

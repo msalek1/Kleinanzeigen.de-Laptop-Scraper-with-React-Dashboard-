@@ -13,10 +13,13 @@
   "dependencies": {
     "@tanstack/react-query": "^5.17.0",
     "axios": "^1.6.2",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.23.25",
     "lucide-react": "^0.303.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.21.1"
+    "react-router-dom": "^6.21.1",
+    "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.45",
