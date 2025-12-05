@@ -196,6 +196,69 @@ The `scrape_page()` method had basic error handling but no retry logic. Rate lim
 
 ---
 
+### BUG-005: Duplicate Listings and Missing Keyword Tracking
+
+| Field | Value |
+|-------|-------|
+| **Bug ID** | BUG-005 |
+| **Status** | Resolved |
+| **Module** | Backend / Frontend |
+| **Severity** | Medium |
+| **Reported** | 2025-12-05 |
+| **Resolved** | 2025-12-05 |
+
+**Description:**  
+When scraping with multiple keywords, the same listing could appear multiple times if it matched different search terms. Additionally, there was no way to track which keyword(s) found each listing, making it impossible to filter listings by search term in the dashboard.
+
+**Steps to Reproduce:**
+1. Configure keywords: "asus rog, gaming laptop"
+2. Run scraper
+3. Same listing could be scraped and stored twice
+4. No way to filter listings by keyword
+
+**Affected Features:**  
+- Listing uniqueness
+- Dashboard filtering
+- User experience
+
+**Root Cause:**  
+1. While `seen_external_ids` prevented duplicate processing within a single job, the database update logic didn't track which keywords found each listing
+2. No `search_keywords` field existed to store keyword associations
+3. No API endpoint to retrieve available keywords for filtering
+4. Frontend had no keyword filter UI
+
+**Fix Summary:**
+
+**Backend Changes:**
+1. Added `search_keywords` column to `Listing` model (comma-separated text field)
+2. Refactored `trigger_scraper()` to use `listings_by_id` dict that tracks keywords per listing
+3. When updating existing listings, keywords are merged (existing + new)
+4. Updated `to_dict()` to return `search_keywords` as a list
+5. Added keyword filter parameter to `GET /api/v1/listings?keyword=xxx`
+6. Created new `GET /api/v1/keywords` endpoint to fetch all unique keywords with counts
+
+**Frontend Changes:**
+1. Added `search_keywords: string[]` to `Listing` interface
+2. Created `keywordsApi.getKeywords()` function
+3. Added `useKeywords()` React Query hook
+4. Added keyword filter tags above FilterBar on HomePage
+5. Clicking a tag filters listings; clicking again clears filter
+6. URL includes `keyword` param for shareable links
+7. Each ListingCard now displays its keyword tags
+
+**Tests Added/Updated:**
+- Manual testing with multiple keywords
+
+**Related Files:**
+- `backend/models.py` - Added `search_keywords` column and updated `to_dict()`
+- `backend/app.py` - Refactored `trigger_scraper()`, added keyword filter to listings, added `/api/v1/keywords` endpoint
+- `frontend/src/services/api.ts` - Added `search_keywords` to Listing, added `keywordsApi`
+- `frontend/src/hooks/useApi.ts` - Added `useKeywords()` hook
+- `frontend/src/pages/HomePage.tsx` - Added keyword filter tags UI
+- `frontend/src/components/ListingCard.tsx` - Added keyword tags display
+
+---
+
 ### Template Entry
 
 | Field | Value |

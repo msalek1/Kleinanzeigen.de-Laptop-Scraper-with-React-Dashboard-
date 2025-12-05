@@ -95,6 +95,7 @@ SQLAlchemy ORM models for data persistence.
 | `price_negotiable` | Boolean | VB flag |
 | `location_city` | String | City name |
 | `condition` | String | Item condition |
+| `search_keywords` | String | Comma-separated search keywords that found this listing |
 
 ### `scraper.py` - Scraping Logic
 Playwright + BeautifulSoup scraping implementation.
@@ -182,6 +183,7 @@ Get paginated listings with optional filters.
 | `max_price` | float | Maximum price in EUR |
 | `location` | string | City filter |
 | `condition` | string | Condition filter |
+| `keyword` | string | Filter by search keyword tag |
 | `sort` | string | Sort field (price, posted_at, scraped_at) |
 | `order` | string | Sort order (asc, desc) |
 
@@ -205,7 +207,8 @@ Get paginated listings with optional filters.
       "posted_at": "2024-12-01T10:00:00",
       "scraped_at": "2024-12-04T08:00:00",
       "image_url": "https://...",
-      "seller_type": null
+      "seller_type": null,
+      "search_keywords": ["asus rog", "gaming laptop"]
     }
   ],
   "pagination": {
@@ -244,6 +247,23 @@ Get aggregate statistics.
       {"city": "Munich", "count": 85}
     ]
   }
+}
+```
+
+#### Get Search Keywords
+```
+GET /api/v1/keywords
+```
+Get all unique search keywords from listings with their counts. Used for keyword filter tags in the dashboard.
+
+**Response:**
+```json
+{
+  "data": [
+    {"keyword": "asus rog", "count": 45},
+    {"keyword": "msi katana", "count": 32},
+    {"keyword": "lenovo legion", "count": 28}
+  ]
 }
 ```
 

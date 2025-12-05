@@ -1,4 +1,4 @@
-import { ExternalLink, MapPin, Tag, Calendar } from 'lucide-react'
+import { ExternalLink, MapPin, Tag, Calendar, Hash } from 'lucide-react'
 import { Listing } from '../services/api'
 
 interface ListingCardProps {
@@ -96,6 +96,21 @@ export default function ListingCard({ listing, onClick }: ListingCardProps) {
             </span>
           )}
         </div>
+        
+        {/* Search keyword tags */}
+        {listing.search_keywords && listing.search_keywords.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {listing.search_keywords.map((kw) => (
+              <span
+                key={kw}
+                className="inline-flex items-center gap-0.5 px-2 py-0.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 rounded text-xs font-medium"
+              >
+                <Hash className="w-2.5 h-2.5" />
+                {kw}
+              </span>
+            ))}
+          </div>
+        )}
         
         {/* External link */}
         <a

@@ -127,6 +127,7 @@ def register_routes(app: Flask):
             max_price (float): Maximum price in EUR.
             location (str): Filter by city name.
             condition (str): Filter by condition.
+            keyword (str): Filter by search keyword tag.
             sort (str): Sort field (price, posted_at, scraped_at).
             order (str): Sort order (asc, desc).
         
@@ -173,6 +174,11 @@ def register_routes(app: Flask):
         if condition:
             query = query.filter(Listing.condition.ilike(f'%{condition}%'))
         
+        # Keyword filter (filter by search keyword tag)
+        keyword = request.args.get('keyword', '').strip()
+        if keyword:
+            query = query.filter(Listing.search_keywords.ilike(f'%{keyword}%'))
+        
         # Sorting
         sort_field = request.args.get('sort', 'scraped_at')
         sort_order = request.args.get('order', 'desc')
@@ -217,6 +223,45 @@ def register_routes(app: Flask):
         """
         listing = Listing.query.get_or_404(listing_id)
         return jsonify({'data': listing.to_dict()})
+    
+    # Keywords endpoint
+    @app.route('/api/v1/keywords', methods=['GET'])
+    @app.route('/api/v1/keywords/', methods=['GET'])
+    def get_keywords():
+        """
+        Get all unique search keywords from listings.
+        
+        Returns:
+            JSON response with array of unique keywords and their counts.
+        """
+        # Get all search_keywords from listings
+        listings_with_keywords = Listing.query.filter(
+            Listing.search_keywords.isnot(None),
+            Listing.search_keywords != ''
+        ).all()
+        
+        # Count occurrences of each keyword
+        keyword_counts = {}
+        for listing in listings_with_keywords:
+            keywords = listing.search_keywords.split(',')
+            for kw in keywords:
+                kw = kw.strip()
+                if kw:
+                    keyword_counts[kw] = keyword_counts.get(kw, 0) + 1
+        
+        # Sort by count descending
+        sorted_keywords = sorted(
+            keyword_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        return jsonify({
+            'data': [
+                {'keyword': kw, 'count': count}
+                for kw, count in sorted_keywords
+            ]
+        })
     
     # Statistics endpoint
     @app.route('/api/v1/stats', methods=['GET'])
@@ -353,8 +398,8 @@ def register_routes(app: Flask):
         db.session.commit()
         
         try:
-            all_listings_data = []
-            seen_external_ids = set()  # For deduplication
+            # Track listings by external_id with their keywords
+            listings_by_id = {}  # {external_id: {'data': listing_data, 'keywords': set()}}
             total_pages_scraped = 0
             keywords_processed = []
             
@@ -387,27 +432,38 @@ def register_routes(app: Flask):
                     listings_data = scraper.scrape()
                     total_pages_scraped += page_limit
                     
-                    # Deduplicate: only add listings we haven't seen
+                    # Track listings and their associated keywords
                     for listing in listings_data:
                         ext_id = listing.get('external_id')
-                        if ext_id and ext_id not in seen_external_ids:
-                            seen_external_ids.add(ext_id)
-                            all_listings_data.append(listing)
+                        if ext_id:
+                            if ext_id not in listings_by_id:
+                                # First time seeing this listing
+                                listings_by_id[ext_id] = {
+                                    'data': listing,
+                                    'keywords': set()
+                                }
+                            # Add this keyword to the listing's keyword set
+                            if keyword:
+                                listings_by_id[ext_id]['keywords'].add(keyword)
                     
-                    logger.info(f"Keyword '{keyword}': found {len(listings_data)} listings, {len(all_listings_data)} unique total")
+                    logger.info(f"Keyword '{keyword}': found {len(listings_data)} listings, {len(listings_by_id)} unique total")
                     
                 except Exception as e:
                     logger.error(f"Error scraping keyword '{keyword}': {e}")
                     # Continue with next keyword instead of failing entire job
                     continue
             
-            # Process all collected results
+            # Process all collected results (now unique by external_id)
             new_count = 0
             updated_count = 0
             
-            for listing_data in all_listings_data:
+            for ext_id, listing_info in listings_by_id.items():
+                listing_data = listing_info['data']
+                keywords_set = listing_info['keywords']
+                keywords_str = ','.join(sorted(keywords_set)) if keywords_set else ''
+                
                 existing = Listing.query.filter_by(
-                    external_id=listing_data['external_id']
+                    external_id=ext_id
                 ).first()
                 
                 if existing:
@@ -421,10 +477,18 @@ def register_routes(app: Flask):
                     existing.condition = listing_data['condition']
                     existing.image_url = listing_data['image_url']
                     existing.updated_at = datetime.utcnow()
+                    # Merge keywords: add new keywords to existing ones
+                    if existing.search_keywords:
+                        existing_keywords = set(k.strip() for k in existing.search_keywords.split(',') if k.strip())
+                        merged_keywords = existing_keywords | keywords_set
+                        existing.search_keywords = ','.join(sorted(merged_keywords))
+                    else:
+                        existing.search_keywords = keywords_str
                     updated_count += 1
                 else:
-                    # Create new listing
+                    # Create new listing with keywords
                     new_listing = Listing.from_scraped_dict(listing_data)
+                    new_listing.search_keywords = keywords_str
                     db.session.add(new_listing)
                     new_count += 1
             
@@ -434,7 +498,7 @@ def register_routes(app: Flask):
             job.status = 'completed'
             job.completed_at = datetime.utcnow()
             job.pages_scraped = total_pages_scraped
-            job.listings_found = len(all_listings_data)
+            job.listings_found = len(listings_by_id)
             job.listings_new = new_count
             job.listings_updated = updated_count
             db.session.commit()

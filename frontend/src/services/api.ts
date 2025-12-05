@@ -25,6 +25,7 @@ export interface Listing {
   scraped_at: string | null
   image_url: string | null
   seller_type: string | null
+  search_keywords: string[]
 }
 
 export interface PaginationInfo {
@@ -89,8 +90,18 @@ export interface ListingsParams {
   max_price?: number
   location?: string
   condition?: string
+  keyword?: string
   sort?: 'price' | 'posted_at' | 'scraped_at' | 'title'
   order?: 'asc' | 'desc'
+}
+
+export interface KeywordData {
+  keyword: string
+  count: number
+}
+
+export interface KeywordsResponse {
+  data: KeywordData[]
 }
 
 export interface ApiError {
@@ -229,6 +240,19 @@ export const statsApi = {
    */
   getStats: async (): Promise<StatsResponse> => {
     const response = await apiClient.get<StatsResponse>('/stats')
+    return response.data
+  },
+}
+
+/**
+ * API functions for search keywords
+ */
+export const keywordsApi = {
+  /**
+   * Get all unique search keywords and their counts.
+   */
+  getKeywords: async (): Promise<KeywordsResponse> => {
+    const response = await apiClient.get<KeywordsResponse>('/keywords')
     return response.data
   },
 }

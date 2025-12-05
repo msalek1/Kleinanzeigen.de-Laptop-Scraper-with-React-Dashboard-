@@ -63,6 +63,9 @@ class Listing(db.Model):
     image_url = db.Column(db.String(500), nullable=True)
     seller_type = db.Column(db.String(50), nullable=True)
     
+    # Keywords that matched this listing (comma-separated)
+    search_keywords = db.Column(db.Text, nullable=True)
+    
     # Debug field - not populated by default
     raw_html = db.Column(db.Text, nullable=True)
     
@@ -76,6 +79,11 @@ class Listing(db.Model):
         Returns:
             Dict containing all listing fields in JSON-serializable format.
         """
+        # Parse search_keywords into list
+        keywords_list = []
+        if self.search_keywords:
+            keywords_list = [k.strip() for k in self.search_keywords.split(',') if k.strip()]
+        
         return {
             'id': self.id,
             'external_id': self.external_id,
@@ -93,6 +101,7 @@ class Listing(db.Model):
             'scraped_at': self.scraped_at.isoformat() if self.scraped_at else None,
             'image_url': self.image_url,
             'seller_type': self.seller_type,
+            'search_keywords': keywords_list,
         }
     
     @classmethod

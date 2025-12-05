@@ -56,6 +56,30 @@ def seed_default_config(app):
             db.session.rollback()
 
 
+def apply_migrations(app):
+    """Apply any pending schema migrations."""
+    with app.app_context():
+        try:
+            # Migration 1: Add search_keywords column to listings if it doesn't exist
+            result = db.session.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.columns 
+                    WHERE table_name = 'listings' AND column_name = 'search_keywords'
+                )
+            """))
+            has_search_keywords = result.scalar()
+            
+            if not has_search_keywords:
+                print("Adding search_keywords column to listings table...")
+                db.session.execute(text("ALTER TABLE listings ADD COLUMN search_keywords TEXT"))
+                db.session.commit()
+                print("search_keywords column added successfully")
+            
+        except Exception as e:
+            print(f"Note: Could not apply migrations (may be SQLite or column exists): {e}")
+            db.session.rollback()
+
+
 def init_database(app):
     """Initialize database tables with advisory lock to prevent race conditions."""
     with app.app_context():
@@ -105,6 +129,7 @@ def main():
         sys.exit(1)
     
     init_database(app)
+    apply_migrations(app)
     seed_default_config(app)
     print("Database initialization complete")
     sys.exit(0)

@@ -6,13 +6,14 @@
  */
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { listingsApi, statsApi, scraperApi, ListingsParams } from '../services/api'
+import { listingsApi, statsApi, scraperApi, keywordsApi, ListingsParams } from '../services/api'
 
 // Query keys for cache management
 export const queryKeys = {
   listings: (params: ListingsParams) => ['listings', params] as const,
   listing: (id: number) => ['listing', id] as const,
   stats: ['stats'] as const,
+  keywords: ['keywords'] as const,
   scraperJobs: (params?: { page?: number; status?: string }) => ['scraperJobs', params] as const,
   scraperJob: (id: number) => ['scraperJob', id] as const,
 }
@@ -45,6 +46,16 @@ export function useStats() {
   return useQuery({
     queryKey: queryKeys.stats,
     queryFn: () => statsApi.getStats(),
+  })
+}
+
+/**
+ * Hook to fetch all unique search keywords.
+ */
+export function useKeywords() {
+  return useQuery({
+    queryKey: queryKeys.keywords,
+    queryFn: () => keywordsApi.getKeywords(),
   })
 }
 

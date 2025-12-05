@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { RefreshCw, Loader2, AlertCircle } from 'lucide-react'
-import { useListings, useTriggerScraper } from '../hooks/useApi'
+import { RefreshCw, Loader2, AlertCircle, Tag, X } from 'lucide-react'
+import { useListings, useTriggerScraper, useKeywords } from '../hooks/useApi'
 import { ListingsParams } from '../services/api'
 import FilterBar from '../components/FilterBar'
 import ListingGrid from '../components/ListingGrid'
@@ -37,6 +37,9 @@ export default function HomePage() {
     const condition = searchParams.get('condition')
     if (condition) params.condition = condition
     
+    const keyword = searchParams.get('keyword')
+    if (keyword) params.keyword = keyword
+    
     const sort = searchParams.get('sort') as ListingsParams['sort']
     if (sort) params.sort = sort
     
@@ -69,6 +72,9 @@ export default function HomePage() {
   // Fetch listings
   const { data, isLoading, error, refetch } = useListings(filters)
   
+  // Fetch keywords for filter tags
+  const { data: keywordsData } = useKeywords()
+  
   // Scraper trigger
   const triggerScraper = useTriggerScraper()
   
@@ -83,6 +89,21 @@ export default function HomePage() {
   const handlePageChange = useCallback((page: number) => {
     handleFilterChange({ ...filters, page })
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [filters, handleFilterChange])
+  
+  const handleKeywordClick = useCallback((keyword: string) => {
+    // If clicking the already-selected keyword, clear it
+    if (filters.keyword === keyword) {
+      const { keyword: _, ...rest } = filters
+      handleFilterChange({ ...rest, page: 1 })
+    } else {
+      handleFilterChange({ ...filters, keyword, page: 1 })
+    }
+  }, [filters, handleFilterChange])
+  
+  const handleClearKeyword = useCallback(() => {
+    const { keyword: _, ...rest } = filters
+    handleFilterChange({ ...rest, page: 1 })
   }, [filters, handleFilterChange])
   
   const showStats = searchParams.get('view') === 'stats'
@@ -135,6 +156,49 @@ export default function HomePage() {
       
       {/* Stats panel (conditional) */}
       {showStats && <StatsPanel />}
+      
+      {/* Keyword filter tags */}
+      {keywordsData?.data && keywordsData.data.length > 0 && (
+        <div className="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center gap-2 mb-3">
+            <Tag className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Filter by search keyword:
+            </span>
+            {filters.keyword && (
+              <button
+                onClick={handleClearKeyword}
+                className="ml-auto text-xs text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 flex items-center gap-1"
+              >
+                <X className="w-3 h-3" />
+                Clear filter
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {keywordsData.data.map(({ keyword, count }) => (
+              <button
+                key={keyword}
+                onClick={() => handleKeywordClick(keyword)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                  filters.keyword === keyword
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                }`}
+              >
+                {keyword}
+                <span className={`text-xs ${
+                  filters.keyword === keyword
+                    ? 'text-primary-200'
+                    : 'text-gray-500 dark:text-gray-400'
+                }`}>
+                  ({count})
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       
       {/* Filters */}
       <FilterBar filters={filters} onFilterChange={handleFilterChange} />
