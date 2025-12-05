@@ -94,6 +94,108 @@ The `wait_until='networkidle'` parameter expects all network activity to cease, 
 
 ---
 
+### BUG-003: Keywords Concatenated Instead of Searched Separately
+
+| Field | Value |
+|-------|-------|
+| **Bug ID** | BUG-003 |
+| **Status** | Resolved |
+| **Module** | Backend / Scraper |
+| **Severity** | High |
+| **Reported** | 2025-12-05 |
+| **Resolved** | 2025-12-05 |
+
+**Description:**  
+When multiple keywords were configured in the admin panel (e.g., "asus rog, msi katana, lenovo legion"), they were being concatenated with `+` signs into a single URL instead of running separate searches for each keyword. This resulted in incorrect search URLs like:
+```
+https://www.kleinanzeigen.de/s-notebooks/berlin/c278?keywords=asus+rog+msi+katana+lenovo+legion+hp+omen
+```
+Instead of searching each keyword separately.
+
+**Steps to Reproduce:**
+1. Go to Admin panel
+2. Add multiple keywords: "asus rog, msi katana, lenovo legion"
+3. Run scraper
+4. Observe concatenated URL in logs
+
+**Affected Features:**  
+- Scraper job execution
+- Search accuracy
+- Listing data collection
+
+**Root Cause:**  
+The `trigger_scraper()` function in `app.py` was replacing commas with `+` signs and building a single URL with all keywords combined:
+```python
+keyword_param = keywords.replace(',', '+').replace(' ', '+')
+```
+This treated all keywords as a single search phrase rather than separate search queries.
+
+**Fix Summary:**  
+1. Refactored `trigger_scraper()` to parse keywords into a list and iterate through each one separately
+2. Each keyword now triggers its own scraper run with a clean URL
+3. Added deduplication logic using `seen_external_ids` set to prevent duplicate listings when the same item appears in multiple keyword searches
+4. Added per-keyword error handling so one failed keyword doesn't abort the entire job
+5. Fixed URL building in `scraper.py` to correctly handle pagination with query parameters
+
+**Example of corrected behavior:**
+```
+Keyword: 'asus rog' - URL: .../c278?keywords=asus+rog
+Keyword: 'msi katana' - URL: .../c278?keywords=msi+katana
+Keyword: 'lenovo legion' - URL: .../c278?keywords=lenovo+legion
+```
+
+**Tests Added/Updated:**
+- Manual testing with multiple keywords in admin panel
+
+**Related Files:**
+- `backend/app.py` (major refactor of `trigger_scraper()`)
+- `backend/scraper.py` (fixed pagination URL building)
+
+---
+
+### BUG-004: Scraper Lacks Retry Logic and Robust Error Handling
+
+| Field | Value |
+|-------|-------|
+| **Bug ID** | BUG-004 |
+| **Status** | Resolved |
+| **Module** | Scraper |
+| **Severity** | Medium |
+| **Reported** | 2025-12-05 |
+| **Resolved** | 2025-12-05 |
+
+**Description:**  
+The scraper would fail silently or abort entirely when encountering transient errors like network timeouts, rate limiting (HTTP 429), or server errors (HTTP 5xx). There was no retry mechanism.
+
+**Steps to Reproduce:**
+1. Run scraper during high traffic period
+2. Encounter rate limit or timeout
+3. Scraper returns empty results without retrying
+
+**Affected Features:**  
+- Scraper reliability
+- Data collection completeness
+
+**Root Cause:**  
+The `scrape_page()` method had basic error handling but no retry logic. Rate limiting responses would just return empty results, and network errors would abort the page entirely.
+
+**Fix Summary:**  
+1. Added retry logic with configurable `MAX_RETRIES = 3`
+2. Implemented exponential backoff for rate limiting (429 responses)
+3. Added retry for server errors (5xx)
+4. Added retry when no listings found (possible page load issue)
+5. Individual listing parse failures now logged and skipped instead of aborting
+6. Per-keyword error handling in `trigger_scraper()` continues with remaining keywords
+
+**Tests Added/Updated:**
+- Manual testing with simulated network issues
+
+**Related Files:**
+- `backend/scraper.py` (`scrape_page()` method)
+- `backend/app.py` (`trigger_scraper()`)
+
+---
+
 ### Template Entry
 
 | Field | Value |

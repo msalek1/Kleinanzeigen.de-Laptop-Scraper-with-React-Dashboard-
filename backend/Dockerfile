@@ -40,8 +40,8 @@ RUN playwright install chromium
 # Copy application code
 COPY . .
 
-# Create startup script
-RUN echo '#!/bin/bash\npython init_db.py && exec gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --timeout 120 app:app' > /app/start.sh && chmod +x /app/start.sh
+# Create startup script with extended timeout for long scraping jobs
+RUN echo '#!/bin/bash\npython init_db.py && exec gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --timeout 600 app:app' > /app/start.sh && chmod +x /app/start.sh
 
 # Expose port
 EXPOSE 5000

@@ -83,6 +83,7 @@ SQLAlchemy ORM models for data persistence.
 **Models:**
 - `Listing` - Scraped notebook listings
 - `ScraperJob` - Job execution tracking
+- `ScraperConfig` - Admin configuration for scraper settings
 
 **Key Fields (Listing):**
 | Field | Type | Description |
@@ -118,6 +119,7 @@ Playwright + BeautifulSoup scraping implementation.
 |------|------|-------------|
 | HomePage | `/` | Main listings grid with filters |
 | Stats View | `/?view=stats` | Statistics panel |
+| AdminPage | `/admin` | Scraper configuration panel |
 
 ### Components
 
@@ -285,6 +287,60 @@ GET /api/v1/scraper/jobs/{id}
 ```
 Get status of a specific job.
 
+#### Get Admin Configuration
+```
+GET /api/v1/admin/config
+```
+Get current scraper configuration settings.
+
+**Response:**
+```json
+{
+  "data": {
+    "id": 1,
+    "keywords": "notebook,laptop",
+    "keywords_list": ["notebook", "laptop"],
+    "city": "",
+    "categories": "c278",
+    "categories_list": ["c278"],
+    "update_interval_minutes": 60,
+    "page_limit": 5,
+    "is_active": false,
+    "last_modified": "2024-12-04T10:30:00Z"
+  }
+}
+```
+
+#### Update Admin Configuration
+```
+PUT /api/v1/admin/config
+```
+Update scraper configuration (admin only).
+
+**Request Body:**
+```json
+{
+  "keywords": "thinkpad,macbook",
+  "city": "berlin",
+  "categories": "c278,c225",
+  "update_interval_minutes": 30,
+  "page_limit": 10,
+  "is_active": true
+}
+```
+
+#### Get Available Categories
+```
+GET /api/v1/admin/categories
+```
+Get list of available Kleinanzeigen categories.
+
+#### Get Available Cities
+```
+GET /api/v1/admin/cities
+```
+Get list of major German cities for filtering.
+
 ---
 
 ## Security & Compliance
@@ -334,17 +390,29 @@ Get status of a specific job.
 
 ### Scraper Job Flow
 ```
-1. Admin clicks "Scrape New Listings" button
+1. Admin clicks "Run Scraper Now" button in Admin panel
 2. POST /api/v1/scraper/jobs triggered
-3. Backend creates ScraperJob record (status: running)
-4. Playwright browser launched
-5. robots.txt checked
-6. Pages scraped with delays
-7. HTML parsed with BeautifulSoup
-8. Listings normalized and saved to DB
-9. ScraperJob updated (status: completed)
-10. Frontend receives job summary
-11. Listings cache invalidated
+3. Backend reads ScraperConfig from database
+4. Scraper URL built from config (keywords, city, categories)
+5. ScraperJob record created (status: running)
+6. Playwright browser launched
+7. robots.txt checked
+8. Pages scraped with delays
+9. HTML parsed with BeautifulSoup
+10. Listings normalized and saved to DB
+11. ScraperJob updated (status: completed)
+12. Frontend receives job summary
+13. Listings cache invalidated
+```
+
+### Admin Configuration Flow
+```
+1. Admin navigates to /admin
+2. Frontend loads config via GET /api/v1/admin/config
+3. Admin modifies keywords, city, categories, or timer
+4. Admin clicks "Save Configuration"
+5. PUT /api/v1/admin/config updates database
+6. Next scraper job uses new configuration
 ```
 
 ### Markup Change Response

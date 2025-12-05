@@ -347,33 +347,52 @@ class KleinanzeigenScraper:
         
         return None
     
-    def scrape_page(self, page: Page, url: str) -> List[Dict[str, Any]]:
+    def scrape_page(self, page: Page, url: str, retry_count: int = 0) -> List[Dict[str, Any]]:
         """
-        Scrape a single page of listings.
+        Scrape a single page of listings with retry logic.
         
         Args:
             page: Playwright page instance.
             url: URL of the page to scrape.
+            retry_count: Current retry attempt (for internal use).
         
         Returns:
             List of parsed listing dictionaries.
         """
-        logger.info(f"Scraping page: {url}")
+        MAX_RETRIES = 3
+        logger.info(f"Scraping page: {url}" + (f" (retry {retry_count})" if retry_count > 0 else ""))
         
         try:
+            # Navigate to page with timeout
             response = page.goto(url, wait_until='domcontentloaded', timeout=60000)
             
             if not response:
                 logger.error(f"No response from {url}")
+                if retry_count < MAX_RETRIES:
+                    time.sleep(self.delay_seconds * 2)
+                    return self.scrape_page(page, url, retry_count + 1)
                 return []
             
+            # Handle rate limiting with exponential backoff
             if response.status == 429:
-                logger.warning("Rate limited (429). Backing off...")
-                time.sleep(self.delay_seconds * 3)
+                backoff_time = self.delay_seconds * (2 ** (retry_count + 1))
+                logger.warning(f"Rate limited (429). Backing off for {backoff_time}s...")
+                time.sleep(backoff_time)
+                if retry_count < MAX_RETRIES:
+                    return self.scrape_page(page, url, retry_count + 1)
                 return []
             
-            if not response.ok:
-                logger.error(f"HTTP {response.status} for {url}")
+            # Handle server errors with retry
+            if response.status >= 500:
+                logger.error(f"Server error HTTP {response.status} for {url}")
+                if retry_count < MAX_RETRIES:
+                    time.sleep(self.delay_seconds * 2)
+                    return self.scrape_page(page, url, retry_count + 1)
+                return []
+            
+            # Handle client errors (don't retry)
+            if response.status >= 400:
+                logger.error(f"Client error HTTP {response.status} for {url}")
                 return []
             
             # Wait for page to stabilize
@@ -394,15 +413,28 @@ class KleinanzeigenScraper:
             articles = soup.select(SELECTORS['listing_item'])
             logger.info(f"Found {len(articles)} listings on page")
             
+            # If no listings found, might be a page issue - try once more
+            if len(articles) == 0 and retry_count < 1:
+                logger.warning(f"No listings found, retrying page...")
+                time.sleep(self.delay_seconds)
+                return self.scrape_page(page, url, retry_count + 1)
+            
             for article in articles:
-                listing = self._parse_listing(article, url)
-                if listing:
-                    listings.append(listing)
+                try:
+                    listing = self._parse_listing(article, url)
+                    if listing:
+                        listings.append(listing)
+                except Exception as e:
+                    logger.warning(f"Failed to parse individual listing: {e}")
+                    continue  # Skip bad listings, continue with others
             
             return listings
             
         except Exception as e:
             logger.error(f"Error scraping page {url}: {e}")
+            if retry_count < MAX_RETRIES:
+                time.sleep(self.delay_seconds * 2)
+                return self.scrape_page(page, url, retry_count + 1)
             return []
     
     def scrape(self, start_page: int = 1) -> List[Dict[str, Any]]:
@@ -448,11 +480,17 @@ class KleinanzeigenScraper:
                 
                 # Scrape pages
                 for page_num in range(start_page, start_page + self.page_limit):
-                    # Build page URL
+                    # Build page URL - handle URLs with query params correctly
                     if page_num == 1:
                         url = self.base_url
                     else:
-                        url = f"{self.base_url}/seite:{page_num}/"
+                        # Check if base_url has query params
+                        if '?' in self.base_url:
+                            # Insert page before query params
+                            base_part, query_part = self.base_url.split('?', 1)
+                            url = f"{base_part}/seite:{page_num}/?{query_part}"
+                        else:
+                            url = f"{self.base_url}/seite:{page_num}/"
                     
                     listings = self.scrape_page(page, url)
                     all_listings.extend(listings)

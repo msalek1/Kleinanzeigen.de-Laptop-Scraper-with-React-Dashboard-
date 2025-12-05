@@ -255,9 +255,12 @@ export const scraperApi = {
   
   /**
    * Trigger a new scraper job.
+   * Uses extended timeout since scraping multiple keywords can take several minutes.
    */
   triggerJob: async (options: { page_limit?: number } = {}): Promise<ScraperJobResponse> => {
-    const response = await apiClient.post<ScraperJobResponse>('/scraper/jobs', options)
+    const response = await apiClient.post<ScraperJobResponse>('/scraper/jobs', options, {
+      timeout: 600000  // 10 minute timeout for scraper jobs
+    })
     return response.data
   },
 }

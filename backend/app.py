@@ -311,9 +311,12 @@ def register_routes(app: Flask):
         """
         Trigger a new scraper job.
         
+        Iterates through each configured keyword separately to ensure
+        accurate search results. Deduplicates listings found across
+        multiple keyword searches.
+        
         Request Body (JSON):
-            page_limit (int): Maximum pages to scrape (default: from admin config).
-            use_config (bool): Whether to use admin config for keywords/city/categories.
+            page_limit (int): Maximum pages to scrape per keyword (default: from admin config).
         
         Returns:
             JSON response with job ID and status.
@@ -330,25 +333,19 @@ def register_routes(app: Flask):
         
         page_limit = data.get('page_limit', admin_config.page_limit)
         
-        # Build scraper URL based on admin config
-        base_url = app.config['SCRAPER_BASE_URL']
+        # Parse keywords into list (each will be searched separately)
+        keywords_raw = admin_config.keywords.strip() if admin_config.keywords else ''
+        keywords_list = [k.strip() for k in keywords_raw.split(',') if k.strip()]
         
-        # If city is set in config, modify base URL
+        # Get city and category settings
         city_slug = admin_config.city.strip() if admin_config.city else ''
         category = admin_config.categories.split(',')[0].strip() if admin_config.categories else 'c278'
         
+        # Build base URL (without keywords)
         if city_slug:
-            # URL format with city: https://www.kleinanzeigen.de/s-notebooks/berlin/c278
-            base_url = f"https://www.kleinanzeigen.de/s-notebooks/{city_slug}/{category}"
+            base_url_template = f"https://www.kleinanzeigen.de/s-notebooks/{city_slug}/{category}"
         else:
-            base_url = f"https://www.kleinanzeigen.de/s-notebooks/{category}"
-        
-        # Add keyword search if configured
-        keywords = admin_config.keywords.strip() if admin_config.keywords else ''
-        if keywords:
-            # URL format with keywords: ...?keywords=thinkpad+laptop
-            keyword_param = keywords.replace(',', '+').replace(' ', '+')
-            base_url = f"{base_url}?keywords={keyword_param}"
+            base_url_template = f"https://www.kleinanzeigen.de/s-notebooks/{category}"
         
         # Create job record
         job = ScraperJob(status='running', started_at=datetime.utcnow())
@@ -356,22 +353,59 @@ def register_routes(app: Flask):
         db.session.commit()
         
         try:
-            # Initialize scraper with config-based URL
-            scraper = KleinanzeigenScraper(
-                base_url=base_url,
-                delay_seconds=app.config['SCRAPER_DELAY_SECONDS'],
-                page_limit=page_limit,
-                browser_type=app.config['PLAYWRIGHT_BROWSER'],
-            )
+            all_listings_data = []
+            seen_external_ids = set()  # For deduplication
+            total_pages_scraped = 0
+            keywords_processed = []
             
-            # Run scraper
-            listings_data = scraper.scrape()
+            # If no keywords, scrape base URL once
+            if not keywords_list:
+                keywords_list = ['']  # Empty string = no keyword filter
             
-            # Process results
+            for keyword in keywords_list:
+                # Build URL for this keyword
+                if keyword:
+                    # URL encode the keyword (spaces become +)
+                    keyword_encoded = keyword.replace(' ', '+')
+                    scrape_url = f"{base_url_template}?keywords={keyword_encoded}"
+                    keywords_processed.append(keyword)
+                else:
+                    scrape_url = base_url_template
+                
+                logger.info(f"Scraping keyword: '{keyword}' - URL: {scrape_url}")
+                
+                try:
+                    # Initialize scraper for this keyword
+                    scraper = KleinanzeigenScraper(
+                        base_url=scrape_url,
+                        delay_seconds=app.config['SCRAPER_DELAY_SECONDS'],
+                        page_limit=page_limit,
+                        browser_type=app.config['PLAYWRIGHT_BROWSER'],
+                    )
+                    
+                    # Run scraper for this keyword
+                    listings_data = scraper.scrape()
+                    total_pages_scraped += page_limit
+                    
+                    # Deduplicate: only add listings we haven't seen
+                    for listing in listings_data:
+                        ext_id = listing.get('external_id')
+                        if ext_id and ext_id not in seen_external_ids:
+                            seen_external_ids.add(ext_id)
+                            all_listings_data.append(listing)
+                    
+                    logger.info(f"Keyword '{keyword}': found {len(listings_data)} listings, {len(all_listings_data)} unique total")
+                    
+                except Exception as e:
+                    logger.error(f"Error scraping keyword '{keyword}': {e}")
+                    # Continue with next keyword instead of failing entire job
+                    continue
+            
+            # Process all collected results
             new_count = 0
             updated_count = 0
             
-            for listing_data in listings_data:
+            for listing_data in all_listings_data:
                 existing = Listing.query.filter_by(
                     external_id=listing_data['external_id']
                 ).first()
@@ -399,17 +433,19 @@ def register_routes(app: Flask):
             # Update job status
             job.status = 'completed'
             job.completed_at = datetime.utcnow()
-            job.pages_scraped = page_limit
-            job.listings_found = len(listings_data)
+            job.pages_scraped = total_pages_scraped
+            job.listings_found = len(all_listings_data)
             job.listings_new = new_count
             job.listings_updated = updated_count
             db.session.commit()
             
-            logger.info(f"Scraper job {job.id} completed: {new_count} new, {updated_count} updated")
+            keywords_summary = ', '.join(keywords_processed) if keywords_processed else 'all'
+            logger.info(f"Scraper job {job.id} completed: {new_count} new, {updated_count} updated (keywords: {keywords_summary})")
             
             return jsonify({
                 'data': job.to_dict(),
-                'message': f'Scraping completed. {new_count} new listings, {updated_count} updated.'
+                'message': f'Scraping completed for {len(keywords_processed)} keyword(s). {new_count} new listings, {updated_count} updated.',
+                'keywords_processed': keywords_processed
             }), 201
             
         except Exception as e:

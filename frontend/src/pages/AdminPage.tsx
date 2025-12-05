@@ -40,6 +40,8 @@ export default function AdminPage() {
   const [pageLimit, setPageLimit] = useState(5)
   const [isActive, setIsActive] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [scrapeStartTime, setScrapeStartTime] = useState<Date | null>(null)
+  const [elapsedTime, setElapsedTime] = useState(0)
   
   // Fetch current config
   const { data: configData, isLoading: configLoading, error: configError } = useQuery({
@@ -76,10 +78,36 @@ export default function AdminPage() {
   // Trigger scraper mutation
   const triggerScraperMutation = useMutation({
     mutationFn: () => scraperApi.triggerJob({ page_limit: pageLimit }),
+    onMutate: () => {
+      setScrapeStartTime(new Date())
+      setElapsedTime(0)
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scraperJobs'] })
+      setScrapeStartTime(null)
+    },
+    onError: () => {
+      setScrapeStartTime(null)
     },
   })
+  
+  // Timer for elapsed time during scraping
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null
+    if (scrapeStartTime && triggerScraperMutation.isPending) {
+      interval = setInterval(() => {
+        setElapsedTime(Math.floor((Date.now() - scrapeStartTime.getTime()) / 1000))
+      }, 1000)
+    }
+    return () => {
+      if (interval) clearInterval(interval)
+    }
+  }, [scrapeStartTime, triggerScraperMutation.isPending])
+  
+  // Calculate estimated time
+  const keywordCount = keywords.split(',').filter(k => k.trim()).length || 1
+  const estimatedSeconds = keywordCount * pageLimit * 8 // ~8 seconds per page (5s delay + scraping)
+  const estimatedMinutes = Math.ceil(estimatedSeconds / 60)
   
   // Populate form when config loads
   useEffect(() => {
@@ -349,22 +377,33 @@ export default function AdminPage() {
           <button
             onClick={handleTriggerScrape}
             disabled={triggerScraperMutation.isPending}
-            className="flex-1 flex items-center justify-center gap-2 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="flex-1 flex flex-col items-center justify-center gap-1 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {triggerScraperMutation.isPending ? (
               <>
-                <RefreshCw className="w-5 h-5 animate-spin" />
-                Running...
+                <div className="flex items-center gap-2">
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                  <span>Scraping {keywordCount} keyword{keywordCount > 1 ? 's' : ''}...</span>
+                </div>
+                <span className="text-xs opacity-80">
+                  {Math.floor(elapsedTime / 60)}:{(elapsedTime % 60).toString().padStart(2, '0')} elapsed 
+                  (est. {estimatedMinutes} min)
+                </span>
               </>
             ) : triggerScraperMutation.isSuccess ? (
               <>
                 <CheckCircle className="w-5 h-5" />
-                Scrape Started!
+                Scrape Completed!
               </>
             ) : (
               <>
-                <Play className="w-5 h-5" />
-                Run Scraper Now
+                <div className="flex items-center gap-2">
+                  <Play className="w-5 h-5" />
+                  <span>Run Scraper Now</span>
+                </div>
+                <span className="text-xs opacity-80">
+                  {keywordCount} keyword{keywordCount > 1 ? 's' : ''} × {pageLimit} pages ≈ {estimatedMinutes} min
+                </span>
               </>
             )}
           </button>
