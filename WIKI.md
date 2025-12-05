@@ -253,6 +253,118 @@ const { alerts, addAlert, removeAlert, checkListingsForAlerts } = usePriceAlerts
 
 ---
 
+## Medium-Priority Features - Performance & Reliability (2025)
+
+### 1. Request Debouncing
+
+**Hook:** `useDebounce.ts`
+
+Debounces search and filter inputs to reduce unnecessary API calls.
+
+**Usage:**
+```typescript
+const [searchText, setSearchText] = useState('')
+const debouncedSearch = useDebounce(searchText, 400)
+
+useEffect(() => {
+  // Only fires 400ms after user stops typing
+  fetchResults(debouncedSearch)
+}, [debouncedSearch])
+```
+
+**Implementation:**
+- `useDebounce<T>(value, delay)` - Debounces a value
+- `useDebouncedCallback(fn, delay)` - Debounces a callback function
+
+### 2. Image Lazy Loading with Blur Placeholder
+
+**Component:** `OptimizedImage.tsx`
+
+Progressive image loading with shimmer effect and lazy loading.
+
+**Features:**
+- Intersection Observer for lazy loading
+- Shimmer placeholder animation
+- Smooth fade-in on load
+- Fallback for missing/broken images
+
+**Usage:**
+```tsx
+<OptimizedImage
+  src={listing.image_url}
+  alt={listing.title}
+  className="w-full h-48 object-cover"
+  fallback={<span>📱</span>}
+  lazy
+/>
+```
+
+### 3. Offline Support (PWA)
+
+**Files:**
+- `public/manifest.json` - PWA manifest
+- `public/sw.js` - Service Worker
+
+**Features:**
+- Caches static assets on install
+- Network-first strategy for API calls
+- Cache-first for static assets
+- Offline fallback to cached data
+
+**Caching Strategies:**
+- Static assets: Cache-first with background update
+- API calls: Network-first with cache fallback
+- SSE endpoints: Excluded from caching
+
+### 4. Error Boundary Components
+
+**Component:** `ErrorBoundary.tsx`
+
+Graceful error handling for React component tree.
+
+**Features:**
+- Catches JavaScript errors in child components
+- Displays friendly error UI
+- "Try Again" and "Go Home" actions
+- Shows error details in development mode
+
+**Usage:**
+```tsx
+<ErrorBoundary onError={(err) => logToService(err)}>
+  <MyComponent />
+</ErrorBoundary>
+```
+
+### 5. Infinite Scroll (Hook Ready)
+
+**Hook:** `useInfiniteScroll.ts`
+
+Intersection Observer-based infinite scroll for listing grids.
+
+**Features:**
+- Sentinel element approach
+- Configurable root margin and threshold
+- Loading state awareness
+- Auto-triggers when near bottom
+
+**Usage:**
+```tsx
+const { sentinelRef } = useInfiniteScroll({
+  onLoadMore: () => fetchNextPage(),
+  hasNextPage: data.pagination.has_next,
+  isLoading: isFetchingNextPage,
+})
+
+return (
+  <>
+    {items.map(item => <Item key={item.id} />)}
+    <div ref={sentinelRef} /> {/* Trigger element */}
+  </>
+)
+```
+
+---
+
 ## API Reference
 
 ### Base URL

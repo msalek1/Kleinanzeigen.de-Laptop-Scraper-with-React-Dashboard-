@@ -3,6 +3,7 @@ import { ExternalLink, MapPin, Tag, Calendar, Hash, Heart, TrendingDown, Trendin
 import { Listing } from '../services/api'
 import { motion } from 'framer-motion'
 import { useFavorites } from '../hooks/useFavorites'
+import OptimizedImage from './OptimizedImage'
 
 interface ListingCardProps {
   listing: Listing
@@ -81,20 +82,13 @@ export default function ListingCard({ listing, onClick }: ListingCardProps) {
       
       {/* Image */}
       <div className="aspect-video bg-gray-100 dark:bg-gray-700 relative overflow-hidden">
-        {listing.image_url ? (
-          <motion.img
-            src={listing.image_url}
-            alt={listing.title}
-            className="w-full h-full object-cover"
-            loading="lazy"
-            whileHover={{ scale: 1.1 }}
-            transition={{ duration: 0.4 }}
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center text-gray-400">
-            <span className="text-4xl">📱</span>
-          </div>
-        )}
+        <OptimizedImage
+          src={listing.image_url}
+          alt={listing.title}
+          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-400"
+          fallback={<span className="text-4xl">📱</span>}
+          lazy
+        />
         
         {/* Price badge with trend indicator */}
         <div className="absolute top-2 right-2 flex items-center gap-1">

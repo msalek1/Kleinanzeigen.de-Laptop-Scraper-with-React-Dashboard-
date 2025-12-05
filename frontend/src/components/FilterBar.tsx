@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Search, SlidersHorizontal, X } from 'lucide-react'
 import { ListingsParams } from '../services/api'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useDebounce } from '../hooks/useDebounce'
 
 interface FilterBarProps {
   filters: ListingsParams
@@ -11,14 +12,54 @@ interface FilterBarProps {
 /**
  * Filter bar component for searching and filtering listings.
  * Supports text search, price range, location, and sorting.
+ * Uses debounced search for better performance.
  */
 export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [searchText, setSearchText] = useState(filters.q || '')
+  const [minPrice, setMinPrice] = useState<string>(filters.min_price?.toString() || '')
+  const [maxPrice, setMaxPrice] = useState<string>(filters.max_price?.toString() || '')
+  const [location, setLocation] = useState(filters.location || '')
+  
+  // Debounce search inputs for better performance
+  const debouncedSearch = useDebounce(searchText, 400)
+  const debouncedMinPrice = useDebounce(minPrice, 500)
+  const debouncedMaxPrice = useDebounce(maxPrice, 500)
+  const debouncedLocation = useDebounce(location, 500)
+  
+  // Apply debounced search
+  useEffect(() => {
+    if (debouncedSearch !== (filters.q || '')) {
+      onFilterChange({ ...filters, q: debouncedSearch || undefined, page: 1 })
+    }
+  }, [debouncedSearch])
+  
+  // Apply debounced price filters
+  useEffect(() => {
+    const newMinPrice = debouncedMinPrice ? Number(debouncedMinPrice) : undefined
+    if (newMinPrice !== filters.min_price) {
+      onFilterChange({ ...filters, min_price: newMinPrice, page: 1 })
+    }
+  }, [debouncedMinPrice])
+  
+  useEffect(() => {
+    const newMaxPrice = debouncedMaxPrice ? Number(debouncedMaxPrice) : undefined
+    if (newMaxPrice !== filters.max_price) {
+      onFilterChange({ ...filters, max_price: newMaxPrice, page: 1 })
+    }
+  }, [debouncedMaxPrice])
+  
+  // Apply debounced location filter
+  useEffect(() => {
+    if (debouncedLocation !== (filters.location || '')) {
+      onFilterChange({ ...filters, location: debouncedLocation || undefined, page: 1 })
+    }
+  }, [debouncedLocation])
   
   const handleSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault()
-    onFilterChange({ ...filters, q: searchText, page: 1 })
+    // Immediate search on form submit
+    onFilterChange({ ...filters, q: searchText || undefined, page: 1 })
   }, [filters, searchText, onFilterChange])
   
   const handleFilterChange = useCallback((key: keyof ListingsParams, value: string | number | undefined) => {
@@ -31,6 +72,9 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
   
   const clearFilters = useCallback(() => {
     setSearchText('')
+    setMinPrice('')
+    setMaxPrice('')
+    setLocation('')
     onFilterChange({ page: 1, per_page: filters.per_page })
   }, [filters.per_page, onFilterChange])
   
@@ -92,8 +136,8 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                   </label>
                   <input
                     type="number"
-                    value={filters.min_price || ''}
-                    onChange={(e) => handleFilterChange('min_price', e.target.value ? Number(e.target.value) : undefined)}
+                    value={minPrice}
+                    onChange={(e) => setMinPrice(e.target.value)}
                     placeholder="0"
                     min="0"
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
@@ -105,8 +149,8 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                   </label>
                   <input
                     type="number"
-                    value={filters.max_price || ''}
-                    onChange={(e) => handleFilterChange('max_price', e.target.value ? Number(e.target.value) : undefined)}
+                    value={maxPrice}
+                    onChange={(e) => setMaxPrice(e.target.value)}
                     placeholder="10000"
                     min="0"
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
@@ -120,8 +164,8 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                   </label>
                   <input
                     type="text"
-                    value={filters.location || ''}
-                    onChange={(e) => handleFilterChange('location', e.target.value || undefined)}
+                    value={location}
+                    onChange={(e) => setLocation(e.target.value)}
                     placeholder="City name..."
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
                   />
