@@ -76,6 +76,9 @@ Environment-driven configuration management.
 - `SCRAPER_BASE_URL` - Kleinanzeigen category URL
 - `SCRAPER_PAGE_LIMIT` - Max pages per scrape
 - `SCRAPER_DELAY_SECONDS` - Polite delay between requests
+- `SCRAPER_CONCURRENCY` - Parallel workers per job (1-4)
+- `SCRAPER_PROXY_URLS` - Comma-separated proxy URLs (optional)
+- `SCRAPER_PROXY_LIST_URL` - URL returning newline-delimited proxies (optional)
 
 ### `models.py` - Database Models
 SQLAlchemy ORM models for data persistence.
@@ -97,6 +100,7 @@ SQLAlchemy ORM models for data persistence.
 | `location_city` | String | City name |
 | `condition` | String | Item condition |
 | `search_keywords` | String | Comma-separated search keywords that found this listing |
+| `item_type` | String | Heuristic type (`laptop`, `accessory`, `other`) for laptop-focused filtering |
 
 ### `scraper.py` - Scraping Logic
 Playwright + BeautifulSoup scraping implementation.
@@ -429,6 +433,7 @@ Get paginated listings with optional filters.
 | `location` | string | City filter |
 | `condition` | string | Condition filter |
 | `keyword` | string | Filter by search keyword tag |
+| `item_type` | string | Filter by heuristic type (`laptop`, `accessory`, `other`, `all`) |
 | `sort` | string | Sort field (price, posted_at, scraped_at) |
 | `order` | string | Sort order (asc, desc) |
 
@@ -453,7 +458,8 @@ Get paginated listings with optional filters.
       "scraped_at": "2024-12-04T08:00:00",
       "image_url": "https://...",
       "seller_type": null,
-      "search_keywords": ["asus rog", "gaming laptop"]
+      "search_keywords": ["asus rog", "gaming laptop"],
+      "item_type": "laptop"
     }
   ],
   "pagination": {
@@ -527,11 +533,26 @@ Trigger a new scraper job (admin only).
 **Request Body:**
 ```json
 {
-  "page_limit": 5
+  "page_limit": 5,
+  "concurrency": 2,
+  "stream": true
 }
 ```
 
-**Response:**
+**Responses:**
+
+`202 Accepted` (stream mode) - returns immediately and emits progress via SSE:
+```json
+{
+  "data": {
+    "id": 1,
+    "status": "running"
+  },
+  "message": "Scraper job started"
+}
+```
+
+`201 Created` (sync mode) - blocks until completed and returns the final job summary:
 ```json
 {
   "data": {
@@ -556,7 +577,7 @@ Get status of a specific job.
 ```
 GET /api/v1/scraper/jobs/{id}/progress
 ```
-Server-Sent Events stream for real-time job progress.
+Server-Sent Events stream for real-time job progress (returns SSE even if the job is already completed, emitting a final `complete` event immediately).
 
 **Events:**
 - `connected` - Initial connection established
@@ -568,7 +589,7 @@ Server-Sent Events stream for real-time job progress.
 ```json
 {
   "status": "running",
-  "current_keyword": "laptop",
+  "current_keyword": "laptop (c278)",
   "keyword_index": 2,
   "total_keywords": 5,
   "listings_found": 45,
@@ -673,6 +694,7 @@ Get list of major German cities for filtering.
 2. FilterBar updates URL query params
 3. HomePage detects param change
 4. useListings hook calls GET /api/v1/listings?q=...
+   - Default focus uses `item_type=laptop` (can switch to `all` in the UI)
 5. Backend queries PostgreSQL with filters
 6. Results returned as JSON
 7. ListingGrid renders ListingCard components
@@ -681,18 +703,20 @@ Get list of major German cities for filtering.
 ### Scraper Job Flow
 ```
 1. Admin clicks "Run Scraper Now" button in Admin panel
-2. POST /api/v1/scraper/jobs triggered
-3. Backend reads ScraperConfig from database
-4. Scraper URL built from config (keywords, city, categories)
-5. ScraperJob record created (status: running)
+2. POST /api/v1/scraper/jobs triggered with {"stream": true}
+3. Backend creates ScraperJob record (status: running) and returns job ID (202)
+4. Frontend opens SSE stream: GET /api/v1/scraper/jobs/{id}/progress
+5. Backend reads ScraperConfig from database (keywords × categories)
 6. Playwright browser launched
+   - Single-worker mode reuses one browser/page
+   - Multi-worker mode launches N isolated workers for faster scraping
 7. robots.txt checked
-8. Pages scraped with delays
+8. Pages scraped with delays and retries
 9. HTML parsed with BeautifulSoup
 10. Listings normalized and saved to DB
 11. ScraperJob updated (status: completed)
-12. Frontend receives job summary
-13. Listings cache invalidated
+12. SSE emits `complete` with job summary
+13. Frontend invalidates caches and refetches listings
 ```
 
 ### Admin Configuration Flow

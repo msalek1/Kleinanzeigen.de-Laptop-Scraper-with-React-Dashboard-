@@ -5,12 +5,16 @@ Uses Playwright for JavaScript rendering and BeautifulSoup for HTML parsing.
 Implements rate limiting, robots.txt compliance, and polite backoff strategies.
 """
 
+import hashlib
 import logging
+import random
 import re
 import time
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, Browser
@@ -54,7 +58,8 @@ class RobotsChecker:
         self.base_url = base_url
         self.parsed = urlparse(base_url)
         self.robots_url = f"{self.parsed.scheme}://{self.parsed.netloc}/robots.txt"
-        self._rules: Optional[Dict[str, List[str]]] = None
+        self._parser: Optional[RobotFileParser] = None
+        self._fetched = False
     
     def fetch_robots(self, page: Page) -> None:
         """
@@ -64,64 +69,51 @@ class RobotsChecker:
             page: Playwright page instance to use for fetching.
         """
         try:
-            response = page.goto(self.robots_url, wait_until='domcontentloaded')
-            if response and response.ok:
-                content = page.content()
-                self._parse_robots(content)
-                logger.info(f"Successfully fetched robots.txt from {self.robots_url}")
-            else:
-                logger.warning(f"Could not fetch robots.txt: {response.status if response else 'No response'}")
-                self._rules = {}
+            response = page.goto(self.robots_url, wait_until='domcontentloaded', timeout=30000)
+            if not response:
+                logger.warning(f"Could not fetch robots.txt: No response from {self.robots_url}")
+                self._fetched = False
+                return
+
+            if not response.ok:
+                logger.warning(f"Could not fetch robots.txt: HTTP {response.status} from {self.robots_url}")
+                self._fetched = False
+                return
+
+            robots_text = response.text()
+            parser = RobotFileParser()
+            parser.parse(robots_text.splitlines())
+            self._parser = parser
+            self._fetched = True
+            logger.info(f"Successfully fetched robots.txt from {self.robots_url}")
         except Exception as e:
             logger.warning(f"Error fetching robots.txt: {e}")
-            self._rules = {}
+            self._fetched = False
     
-    def _parse_robots(self, content: str) -> None:
-        """Parse robots.txt content into rules dictionary."""
-        self._rules = {'disallow': [], 'allow': []}
-        current_agent = None
-        
-        for line in content.split('\n'):
-            line = line.strip().lower()
-            if line.startswith('user-agent:'):
-                agent = line.split(':', 1)[1].strip()
-                if agent == '*' or 'bot' in agent:
-                    current_agent = agent
-            elif current_agent and line.startswith('disallow:'):
-                path = line.split(':', 1)[1].strip()
-                if path:
-                    self._rules['disallow'].append(path)
-            elif current_agent and line.startswith('allow:'):
-                path = line.split(':', 1)[1].strip()
-                if path:
-                    self._rules['allow'].append(path)
-    
-    def is_allowed(self, path: str) -> bool:
+    def is_allowed(self, url_or_path: str) -> bool:
         """
         Check if scraping a specific path is allowed.
         
         Args:
-            path: URL path to check (e.g., '/s-notebooks/c278').
+            url_or_path: URL or path to check (e.g., '/s-notebooks/c278').
         
         Returns:
             bool: True if scraping is allowed, False otherwise.
         """
-        if self._rules is None:
-            logger.warning("robots.txt not fetched, assuming allowed")
+        if not self._fetched or not self._parser:
+            logger.warning("robots.txt not fetched/parsed, assuming allowed")
             return True
         
-        # Check allow rules first (they take precedence)
-        for allow_path in self._rules.get('allow', []):
-            if path.startswith(allow_path):
-                return True
-        
-        # Check disallow rules
-        for disallow_path in self._rules.get('disallow', []):
-            if path.startswith(disallow_path):
-                logger.warning(f"Path {path} is disallowed by robots.txt")
-                return False
-        
-        return True
+        # RobotFileParser works on URLs; normalize if caller passed a path.
+        if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
+            url = url_or_path
+        else:
+            url = f"{self.parsed.scheme}://{self.parsed.netloc}{url_or_path}"
+
+        allowed = self._parser.can_fetch('*', url)
+        if not allowed:
+            logger.warning(f"Disallowed by robots.txt: {url_or_path}")
+        return allowed
 
 
 class KleinanzeigenScraper:
@@ -164,8 +156,54 @@ class KleinanzeigenScraper:
         self.proxy = proxy
         self._browser: Optional[Browser] = None
         self._robots_checker: Optional[RobotsChecker] = None
+
+    @staticmethod
+    def build_page_url(base_url: str, page_num: int) -> str:
+        """
+        Build the correct pagination URL for Kleinanzeigen.
+
+        Supports base URLs with query params by inserting the page segment
+        before the query string.
+        """
+        if page_num <= 1:
+            return base_url
+
+        if '?' in base_url:
+            base_part, query_part = base_url.split('?', 1)
+            base_part = base_part.rstrip('/')
+            return f"{base_part}/seite:{page_num}/?{query_part}"
+
+        base_part = base_url.rstrip('/')
+        return f"{base_part}/seite:{page_num}/"
+
+    @contextmanager
+    def open_page(self) -> Page:
+        """Open a single Playwright page (browser+context) for reuse across many scrapes."""
+        with sync_playwright() as p:
+            browser_launcher = getattr(p, self.browser_type)
+            launch_options = {'headless': True}
+            if self.proxy:
+                launch_options['proxy'] = self.proxy
+
+            browser = browser_launcher.launch(**launch_options)
+            context = browser.new_context(
+                user_agent=DEFAULT_USER_AGENT,
+                viewport={'width': 1920, 'height': 1080},
+                locale='de-DE',
+                timezone_id='Europe/Berlin',
+                extra_http_headers={
+                    'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
+                },
+            )
+            page = context.new_page()
+            page.set_default_timeout(30000)
+
+            try:
+                yield page
+            finally:
+                browser.close()
     
-    def _extract_price(self, price_text: str) -> tuple[Optional[float], bool]:
+    def _extract_price(self, price_text: Optional[str]) -> tuple[Optional[float], bool]:
         """
         Extract numeric price and negotiable flag from price text.
         
@@ -179,17 +217,23 @@ class KleinanzeigenScraper:
         if not price_text:
             return None, False
         
-        text = price_text.strip().upper()
-        is_negotiable = 'VB' in text
-        
-        # Remove currency symbols and "VB"
-        cleaned = re.sub(r'[€VB\s]', '', text)
-        # Handle German number format (1.234,56)
-        cleaned = cleaned.replace('.', '').replace(',', '.')
-        
+        text = price_text.strip()
+        upper = text.upper()
+        is_negotiable = bool(re.search(r'\bVB\b', upper)) or 'VERHANDLUNGSBASIS' in upper
+
+        # Common non-numeric price labels
+        if 'ZU VERSCHENKEN' in upper or 'VERSCHENKE' in upper:
+            return 0.0, is_negotiable
+
+        # Extract first number-like token and normalize German formatting.
+        match = re.search(r'(\d[\d\.\,\s]*)', upper)
+        if not match:
+            return None, is_negotiable
+
+        numeric = match.group(1)
+        numeric = numeric.replace(' ', '').replace('.', '').replace(',', '.')
         try:
-            price = float(cleaned)
-            return price, is_negotiable
+            return float(numeric), is_negotiable
         except ValueError:
             return None, is_negotiable
     
@@ -204,11 +248,11 @@ class KleinanzeigenScraper:
             str: External listing ID.
         """
         # URLs like /s-anzeige/laptop-dell-xps/1234567890-278-1234
-        match = re.search(r'/(\d{9,})', url)
+        match = re.search(r'/(\d{9,})(?:-[\d-]+)?(?:/|$|\?)', url)
         if match:
             return match.group(1)
-        # Fallback: use URL hash
-        return str(hash(url))
+        # Fallback: deterministic ID from the URL (stable across runs)
+        return hashlib.sha256(url.encode('utf-8')).hexdigest()[:32]
     
     def _parse_listing(self, article: BeautifulSoup, base_url: str) -> Optional[Dict[str, Any]]:
         """
@@ -329,12 +373,22 @@ class KleinanzeigenScraper:
         
         text = date_text.strip().lower()
         now = datetime.now()
+
+        # Extract optional time (e.g., "Heute, 14:30")
+        time_match = re.search(r'(\d{1,2}):(\d{2})', text)
+        hour = int(time_match.group(1)) if time_match else None
+        minute = int(time_match.group(2)) if time_match else None
         
         # Handle relative dates
         if 'heute' in text:
+            if hour is not None and minute is not None:
+                return datetime(now.year, now.month, now.day, hour, minute)
             return now
         if 'gestern' in text:
-            return datetime(now.year, now.month, now.day - 1)
+            yesterday = now - timedelta(days=1)
+            if hour is not None and minute is not None:
+                return datetime(yesterday.year, yesterday.month, yesterday.day, hour, minute)
+            return datetime(yesterday.year, yesterday.month, yesterday.day)
         
         # Try parsing absolute date (DD.MM.YYYY)
         match = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', text)
@@ -344,8 +398,35 @@ class KleinanzeigenScraper:
                 return datetime(year, month, day)
             except ValueError:
                 pass
+
+        # Try parsing short date without year (DD.MM.)
+        match = re.search(r'(\d{2})\.(\d{2})\.', text)
+        if match:
+            day, month = int(match.group(1)), int(match.group(2))
+            try:
+                return datetime(now.year, month, day)
+            except ValueError:
+                pass
         
         return None
+
+    def _looks_like_blocked_page(self, html: str) -> bool:
+        """
+        Heuristic detection for access blocks / challenge pages.
+
+        This does not attempt to bypass access controls; it just helps fail fast
+        and apply backoff when the site presents a block page.
+        """
+        lower = html.lower()
+        markers = (
+            'captcha',
+            'robot',
+            'zugriff verweigert',
+            'access denied',
+            'unusual traffic',
+            'bot detection',
+        )
+        return any(m in lower for m in markers)
     
     def scrape_page(self, page: Page, url: str, retry_count: int = 0) -> List[Dict[str, Any]]:
         """
@@ -397,7 +478,7 @@ class KleinanzeigenScraper:
             
             # Wait for page to stabilize
             page.wait_for_load_state('domcontentloaded')
-            time.sleep(2)  # Allow dynamic content to load
+            time.sleep(1.5 + random.random() * 1.5)  # Allow dynamic content to load (+ jitter)
             
             # Try to wait for listings, but don't fail if not found
             try:
@@ -407,6 +488,12 @@ class KleinanzeigenScraper:
             
             # Get page content and parse
             html = page.content()
+            if self._looks_like_blocked_page(html):
+                logger.warning(f"Page content looks like an access block/challenge: {url}")
+                if retry_count < MAX_RETRIES:
+                    time.sleep(self.delay_seconds * (2 ** (retry_count + 1)))
+                    return self.scrape_page(page, url, retry_count + 1)
+                return []
             soup = BeautifulSoup(html, 'html.parser')
             
             listings = []
@@ -454,56 +541,29 @@ class KleinanzeigenScraper:
             Exception: If scraping is not allowed by robots.txt.
         """
         all_listings = []
-        
-        with sync_playwright() as p:
-            # Launch browser
-            browser_launcher = getattr(p, self.browser_type)
-            launch_options = {'headless': True}
-            if self.proxy:
-                launch_options['proxy'] = self.proxy
-            
-            browser = browser_launcher.launch(**launch_options)
-            context = browser.new_context(
-                user_agent=DEFAULT_USER_AGENT,
-                viewport={'width': 1920, 'height': 1080},
-            )
-            page = context.new_page()
-            
-            try:
-                # Check robots.txt compliance
-                self._robots_checker = RobotsChecker(self.base_url)
-                self._robots_checker.fetch_robots(page)
-                
-                parsed_url = urlparse(self.base_url)
-                if not self._robots_checker.is_allowed(parsed_url.path):
-                    raise Exception(f"Scraping not allowed by robots.txt for {parsed_url.path}")
-                
-                # Scrape pages
-                for page_num in range(start_page, start_page + self.page_limit):
-                    # Build page URL - handle URLs with query params correctly
-                    if page_num == 1:
-                        url = self.base_url
-                    else:
-                        # Check if base_url has query params
-                        if '?' in self.base_url:
-                            # Insert page before query params
-                            base_part, query_part = self.base_url.split('?', 1)
-                            url = f"{base_part}/seite:{page_num}/?{query_part}"
-                        else:
-                            url = f"{self.base_url}/seite:{page_num}/"
-                    
-                    listings = self.scrape_page(page, url)
-                    all_listings.extend(listings)
-                    
-                    logger.info(f"Total listings so far: {len(all_listings)}")
-                    
-                    # Polite delay between pages
-                    if page_num < start_page + self.page_limit - 1:
-                        logger.debug(f"Waiting {self.delay_seconds}s before next page...")
-                        time.sleep(self.delay_seconds)
-                
-            finally:
-                browser.close()
+
+        with self.open_page() as page:
+            # Check robots.txt compliance
+            self._robots_checker = RobotsChecker(self.base_url)
+            self._robots_checker.fetch_robots(page)
+
+            parsed_url = urlparse(self.base_url)
+            if not self._robots_checker.is_allowed(parsed_url.path):
+                raise Exception(f"Scraping not allowed by robots.txt for {parsed_url.path}")
+
+            # Scrape pages
+            for page_num in range(start_page, start_page + self.page_limit):
+                url = self.build_page_url(self.base_url, page_num)
+
+                listings = self.scrape_page(page, url)
+                all_listings.extend(listings)
+
+                logger.info(f"Total listings so far: {len(all_listings)}")
+
+                # Polite delay between pages
+                if page_num < start_page + self.page_limit - 1:
+                    logger.debug(f"Waiting {self.delay_seconds}s before next page...")
+                    time.sleep(self.delay_seconds)
         
         logger.info(f"Scraping complete. Total listings: {len(all_listings)}")
         return all_listings

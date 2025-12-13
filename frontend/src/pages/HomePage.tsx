@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { RefreshCw, Loader2, AlertCircle, X, Sparkles } from 'lucide-react'
-import { useListings, useTriggerScraper, useKeywords } from '../hooks/useApi'
+import { useListings, useKeywords } from '../hooks/useApi'
 import { ListingsParams, Listing } from '../services/api'
 import FilterBar from '../components/FilterBar'
 import ListingGrid from '../components/ListingGrid'
@@ -9,7 +9,7 @@ import Pagination from '../components/Pagination'
 import StatsPanel from '../components/StatsPanel'
 import ListingModal from '../components/ListingModal'
 import ScraperProgressPanel from '../components/ScraperProgressPanel'
-import { useScraperSSE } from '../hooks/useScraperSSE'
+import { useScraperWithProgress } from '../hooks/useScraperSSE'
 import { motion, AnimatePresence } from 'framer-motion'
 
 /**
@@ -19,22 +19,22 @@ import { motion, AnimatePresence } from 'framer-motion'
 export default function HomePage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [selectedListing, setSelectedListing] = useState<Listing | null>(null)
-  const [currentJobId, setCurrentJobId] = useState<number | null>(null)
-  
-  // SSE for real-time scraper progress
-  const { progress, isConnected } = useScraperSSE(currentJobId, {
-    onComplete: () => {
-      // Refetch listings after scrape completes
-      refetch()
-      setCurrentJobId(null)
-    },
-  })
+  const {
+    startScraper,
+    progress: scraperProgress,
+    result: scraperResult,
+    isStarting,
+    isRunning,
+    error: scraperError,
+  } = useScraperWithProgress()
+  const progressForPanel = scraperProgress || scraperResult
   
   // Parse filters from URL
   const getFiltersFromUrl = useCallback((): ListingsParams => {
     const params: ListingsParams = {
       page: parseInt(searchParams.get('page') || '1'),
       per_page: parseInt(searchParams.get('per_page') || '20'),
+      item_type: 'laptop',
     }
     
     const q = searchParams.get('q')
@@ -54,6 +54,9 @@ export default function HomePage() {
     
     const keyword = searchParams.get('keyword')
     if (keyword) params.keyword = keyword
+
+    const itemType = searchParams.get('item_type') as ListingsParams['item_type']
+    if (itemType) params.item_type = itemType
     
     const sort = searchParams.get('sort') as ListingsParams['sort']
     if (sort) params.sort = sort
@@ -73,6 +76,7 @@ export default function HomePage() {
     const params = new URLSearchParams()
     Object.entries(newFilters).forEach(([key, value]) => {
       if (value !== undefined && value !== '') {
+        if (key === 'item_type' && value === 'laptop') return
         params.set(key, String(value))
       }
     })
@@ -86,24 +90,20 @@ export default function HomePage() {
   
   // Fetch listings
   const { data, isLoading, error, refetch } = useListings(filters)
+
+  // Refetch listings once scraping completes
+  useEffect(() => {
+    if (scraperResult?.status === 'completed') {
+      refetch()
+    }
+  }, [scraperResult?.status, refetch])
   
   // Fetch keywords for filter tags
   const { data: keywordsData } = useKeywords()
   
-  // Scraper trigger
-  const triggerScraper = useTriggerScraper()
-  
-  const handleTriggerScrape = useCallback(async () => {
-    try {
-      const result = await triggerScraper.mutateAsync({ page_limit: 3 })
-      // Set job ID to start SSE connection
-      if (result.data?.id) {
-        setCurrentJobId(result.data.id)
-      }
-    } catch (err) {
-      console.error('Failed to trigger scraper:', err)
-    }
-  }, [triggerScraper])
+  const handleTriggerScrape = useCallback(() => {
+    startScraper(3)
+  }, [startScraper])
   
   const handlePageChange = useCallback((page: number) => {
     handleFilterChange({ ...filters, page })
@@ -113,8 +113,7 @@ export default function HomePage() {
   const handleKeywordClick = useCallback((keyword: string) => {
     // If clicking the already-selected keyword, clear it
     if (filters.keyword === keyword) {
-      const { keyword: _, ...rest } = filters
-      handleFilterChange({ ...rest, page: 1 })
+      handleFilterChange({ ...filters, keyword: undefined, page: 1 })
     } else {
       handleFilterChange({ ...filters, keyword, page: 1 })
     }
@@ -146,12 +145,12 @@ export default function HomePage() {
         <h1 className="text-5xl md:text-6xl font-extrabold text-gray-900 dark:text-white tracking-tight mb-4">
           Find Your Perfect <br />
           <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary-600 to-emerald-500 dark:from-primary-400 dark:to-emerald-400">
-            Notebook Today
+            Laptop Today
           </span>
         </h1>
         
         <p className="text-lg text-gray-600 dark:text-gray-400 max-w-2xl mx-auto mb-8 leading-relaxed">
-          Browse thousands of curated notebook listings from Kleinanzeigen. 
+          Browse thousands of curated laptop listings from Kleinanzeigen. 
           Analyze prices, compare specs, and find the best value for your money.
         </p>
 
@@ -159,10 +158,10 @@ export default function HomePage() {
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={handleTriggerScrape}
-          disabled={triggerScraper.isPending}
+          disabled={isStarting || isRunning}
           className="inline-flex items-center gap-2 px-6 py-3 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-full shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed transition-all font-semibold text-sm"
         >
-          {triggerScraper.isPending ? (
+          {isStarting || isRunning ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
               Scraping New Listings...
@@ -177,33 +176,38 @@ export default function HomePage() {
       </motion.div>
       
       {/* Success/error messages */}
-      {triggerScraper.isSuccess && (
+      {scraperResult?.status === 'completed' && (
         <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             className="mb-8 max-w-2xl mx-auto p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl text-green-700 dark:text-green-400 flex items-center justify-center gap-2 font-medium"
         >
           <Sparkles className="w-5 h-5" />
-          {triggerScraper.data.message || 'Scraping completed successfully!'}
+          {scraperResult.message || 'Scraping completed successfully!'}
         </motion.div>
       )}
       
-      {triggerScraper.isError && (
+      {scraperResult?.status === 'failed' && (
         <div className="mb-8 max-w-2xl mx-auto p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-400 flex items-center justify-center gap-2">
           <AlertCircle className="w-5 h-5" />
-          Failed to trigger scraper. Please try again later.
+          {scraperResult.error || 'Scraper failed. Please check logs and try again.'}
+        </div>
+      )}
+
+      {scraperError && scraperResult?.status !== 'failed' && (
+        <div className="mb-8 max-w-2xl mx-auto p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl text-yellow-800 dark:text-yellow-300 flex items-center justify-center gap-2">
+          <AlertCircle className="w-5 h-5" />
+          Live progress connection lost. The job may still be running.
         </div>
       )}
       
       {/* Real-time scraper progress */}
       <AnimatePresence>
-        {(isConnected || triggerScraper.isPending) && (
-          <ScraperProgressPanel 
-            progress={progress} 
-            isRunning={isConnected && progress?.status === 'running'}
-            isStarting={triggerScraper.isPending && !isConnected}
-          />
-        )}
+        <ScraperProgressPanel 
+          progress={progressForPanel} 
+          isRunning={isRunning && progressForPanel?.status === 'running'}
+          isStarting={isStarting}
+        />
       </AnimatePresence>
       
       {/* Stats panel (conditional) */}

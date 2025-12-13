@@ -4,19 +4,27 @@ Flask application entrypoint for the Kleinanzeigen Notebook Scraper API.
 Exposes REST endpoints for listing retrieval, filtering, and scraper management.
 """
 
+import json
 import logging
+import queue
+import time
 from datetime import datetime
 from functools import wraps
+from threading import Thread, Lock
 from typing import Any, Dict, Optional
+from urllib.error import URLError
+import urllib.request
+from urllib.parse import quote_plus, urlparse, unquote
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 from sqlalchemy import or_
 
 from config import get_config
 from models import db, Listing, ScraperJob, ScraperConfig, PriceHistory
-from scraper import KleinanzeigenScraper
-from sse import progress_manager, create_sse_response
+from classifier import classify_item_type
+from scraper import KleinanzeigenScraper, RobotsChecker
+from sse import progress_manager
 
 # Configure logging
 logging.basicConfig(
@@ -179,6 +187,15 @@ def register_routes(app: Flask):
         keyword = request.args.get('keyword', '').strip()
         if keyword:
             query = query.filter(Listing.search_keywords.ilike(f'%{keyword}%'))
+
+        # Item type filter (laptop/accessory/other)
+        item_type = request.args.get('item_type', '').strip().lower()
+        if item_type and item_type != 'all':
+            if item_type == 'laptop':
+                # Backwards compatible: treat unclassified rows as laptop so existing DBs still show results.
+                query = query.filter(or_(Listing.item_type == 'laptop', Listing.item_type.is_(None), Listing.item_type == ''))
+            else:
+                query = query.filter(Listing.item_type == item_type)
         
         # Sorting
         sort_field = request.args.get('sort', 'scraped_at')
@@ -316,6 +333,578 @@ def register_routes(app: Flask):
         })
     
     # Scraper endpoints
+
+    CATEGORY_DEFINITIONS = {
+        'c278': {'slug': 'notebooks', 'name': 'Notebooks', 'description': 'Notebook/Laptop computers'},
+        'c225': {'slug': 'pcs', 'name': 'PCs', 'description': 'Desktop computers'},
+        'c285': {'slug': 'tablets', 'name': 'Tablets & Reader', 'description': 'Tablets and E-Readers'},
+        'c161': {'slug': 'elektronik', 'name': 'Elektronik', 'description': 'All electronics'},
+        'c228': {'slug': 'pc-zubehoer-software', 'name': 'PC Zubehör & Software', 'description': 'PC accessories and software'},
+    }
+
+    def _parse_playwright_proxy(proxy_url: str) -> Optional[Dict[str, str]]:
+        """
+        Parse a proxy URL into a Playwright proxy dict.
+
+        Supports URLs like: http://user:pass@host:port
+        """
+        proxy_url = (proxy_url or '').strip()
+        if not proxy_url:
+            return None
+
+        parsed = urlparse(proxy_url)
+        if not parsed.scheme or not parsed.netloc:
+            return {'server': proxy_url}
+
+        if not parsed.hostname:
+            return {'server': proxy_url}
+
+        server = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            server = f"{server}:{parsed.port}"
+
+        proxy: Dict[str, str] = {'server': server}
+        if parsed.username:
+            proxy['username'] = unquote(parsed.username)
+        if parsed.password:
+            proxy['password'] = unquote(parsed.password)
+        return proxy
+
+    def _fetch_proxy_list(url: str) -> list[str]:
+        """Fetch a newline-delimited proxy list from a URL (best-effort)."""
+        url = (url or '').strip()
+        if not url:
+            return []
+
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Klienz/1.0'})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read()
+            text = raw.decode('utf-8', errors='ignore')
+            return [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip() and not line.strip().startswith('#')
+            ]
+        except URLError as e:
+            logger.warning(f"Could not fetch proxy list from {url}: {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"Could not fetch proxy list from {url}: {e}")
+            return []
+
+    def _get_playwright_proxy_pool() -> list[Dict[str, str]]:
+        """
+        Build a list of Playwright proxy dicts.
+
+        Priority:
+          1) SCRAPER_PROXY_URLS (comma-separated)
+          2) SCRAPER_PROXY_LIST_URL (newline-delimited response)
+          3) HTTPS_PROXY / HTTP_PROXY
+        """
+        urls: list[str] = []
+
+        urls_raw = (app.config.get('SCRAPER_PROXY_URLS') or '').strip()
+        if urls_raw:
+            urls.extend([u.strip() for u in urls_raw.split(',') if u.strip()])
+
+        list_url = (app.config.get('SCRAPER_PROXY_LIST_URL') or '').strip()
+        if list_url:
+            urls.extend(_fetch_proxy_list(list_url))
+
+        if not urls:
+            single = app.config.get('HTTPS_PROXY') or app.config.get('HTTP_PROXY')
+            if single:
+                urls = [single]
+
+        proxies: list[Dict[str, str]] = []
+        seen: set[str] = set()
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            parsed = _parse_playwright_proxy(url)
+            if parsed:
+                proxies.append(parsed)
+        return proxies
+
+    def _save_job_progress(job: ScraperJob, progress: Dict[str, Any], *, completed: bool = False) -> None:
+        """Persist and publish progress for SSE consumers."""
+        payload = dict(progress)
+        payload['timestamp'] = datetime.utcnow().isoformat()
+        if completed:
+            payload['completed'] = True
+
+        job.progress_json = json.dumps(payload, ensure_ascii=False)
+        db.session.commit()
+
+        if completed:
+            progress_manager.complete(job.id, payload)
+        else:
+            progress_manager.publish(job.id, payload)
+
+    def _run_scraper_job(
+        job_id: int,
+        page_limit_override: Optional[int] = None,
+        concurrency_override: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute a scraper job and persist results.
+
+        Returns a small summary dict for API responses.
+        """
+        job = ScraperJob.query.get(job_id)
+        if not job:
+            logger.error(f"Scraper job {job_id} not found")
+            return {}
+
+        # Get admin config for scraper settings
+        admin_config = ScraperConfig.get_config()
+
+        page_limit = page_limit_override if page_limit_override is not None else admin_config.page_limit
+        page_limit = int(page_limit)
+        if page_limit < 1 or page_limit > 50:
+            raise ValueError('Page limit must be between 1 and 50')
+
+        concurrency = concurrency_override if concurrency_override is not None else app.config.get('SCRAPER_CONCURRENCY', 1)
+        try:
+            concurrency = int(concurrency)
+        except (TypeError, ValueError):
+            concurrency = 1
+        concurrency = max(1, min(concurrency, 4))
+
+        # Parse keywords into list (each will be searched separately)
+        keywords_raw = admin_config.keywords.strip() if admin_config.keywords else ''
+        keywords_list = [k.strip() for k in keywords_raw.split(',') if k.strip()]
+
+        # If no keywords, scrape base URL once
+        if not keywords_list:
+            keywords_list = ['']  # Empty string = no keyword filter
+
+        # Parse categories into list (scrape each category)
+        categories_raw = admin_config.categories.strip() if admin_config.categories else ''
+        categories_list = [c.strip() for c in categories_raw.split(',') if c.strip()] or ['c278']
+
+        # Get city setting
+        city_slug = admin_config.city.strip() if admin_config.city else ''
+
+        # Cross-product: category x keyword
+        tasks = [(category, keyword) for category in categories_list for keyword in keywords_list]
+        total_tasks = len(tasks) or 1
+
+        proxy_pool = _get_playwright_proxy_pool()
+
+        def _proxy_for_worker(worker_id: int) -> Optional[Dict[str, str]]:
+            if not proxy_pool:
+                return None
+            return proxy_pool[worker_id % len(proxy_pool)]
+
+        # Track start time for progress
+        start_time = time.time()
+
+        # Track listings by external_id with their keywords
+        listings_by_id: Dict[str, Dict[str, Any]] = {}  # {external_id: {'data': dict, 'keywords': set[str]}}
+        total_pages_scraped = 0
+        keywords_processed: set[str] = set()
+
+        scraper_kwargs = {
+            'delay_seconds': app.config['SCRAPER_DELAY_SECONDS'],
+            'page_limit': page_limit,
+            'browser_type': app.config['PLAYWRIGHT_BROWSER'],
+        }
+
+        seen_external_ids: set[str] = set()
+        seen_lock = Lock()
+
+        def _display_for_task(category: str, keyword: str) -> str:
+            label = keyword or 'all'
+            return f"{label} ({category})" if len(categories_list) > 1 else label
+
+        def _build_scrape_url(category: str, keyword: str) -> str:
+            category_slug = CATEGORY_DEFINITIONS.get(category, {'slug': 'notebooks'}).get('slug', 'notebooks')
+            if city_slug:
+                base_url_template = f"https://www.kleinanzeigen.de/s-{category_slug}/{city_slug}/{category}"
+            else:
+                base_url_template = f"https://www.kleinanzeigen.de/s-{category_slug}/{category}"
+            if keyword:
+                return f"{base_url_template}?keywords={quote_plus(keyword)}"
+            return base_url_template
+
+        def _scrape_task(
+            page,
+            scraper: KleinanzeigenScraper,
+            robots_checker: RobotsChecker,
+            category: str,
+            keyword: str,
+        ) -> tuple[list[dict[str, Any]], int]:
+            scrape_url = _build_scrape_url(category, keyword)
+
+            logger.info(f"Scraping category={category} keyword='{keyword}' url={scrape_url}")
+
+            if not robots_checker.is_allowed(urlparse(scrape_url).path):
+                logger.warning(f"Skipping disallowed path by robots.txt: {scrape_url}")
+                return [], 0
+
+            listings_data: list[dict[str, Any]] = []
+            no_new_pages = 0
+            pages_scraped_local = 0
+
+            for page_num in range(1, page_limit + 1):
+                page_url = scraper.build_page_url(scrape_url, page_num)
+                page_listings = scraper.scrape_page(page, page_url)
+                pages_scraped_local += 1
+                listings_data.extend(page_listings)
+
+                ext_ids = [l.get('external_id') for l in page_listings if l.get('external_id')]
+                if ext_ids:
+                    with seen_lock:
+                        before = len(seen_external_ids)
+                        seen_external_ids.update(ext_ids)
+                        after = len(seen_external_ids)
+                    new_count = after - before
+                else:
+                    new_count = 0
+
+                if new_count == 0:
+                    no_new_pages += 1
+                else:
+                    no_new_pages = 0
+
+                # Stop early if we keep seeing only duplicates / empty pages.
+                if not page_listings or no_new_pages >= 2:
+                    break
+
+                # Polite delay between pages
+                if page_num < page_limit:
+                    time.sleep(scraper.delay_seconds)
+
+            return listings_data, pages_scraped_local
+
+        def _merge_task_results(category: str, keyword: str, task_listings: list[dict[str, Any]]):
+            for listing in task_listings:
+                ext_id = listing.get('external_id')
+                if not ext_id:
+                    continue
+
+                if ext_id not in listings_by_id:
+                    listings_by_id[ext_id] = {
+                        'data': listing,
+                        'keywords': set(),
+                    }
+                else:
+                    # Keep latest parsed fields (title/price/desc might change)
+                    listings_by_id[ext_id]['data'] = listing
+
+                if keyword:
+                    listings_by_id[ext_id]['keywords'].add(keyword)
+
+        # Single-worker mode: reuse one browser/page for the entire job (fastest + simplest)
+        if concurrency <= 1 or total_tasks <= 1:
+            robots_checker = RobotsChecker('https://www.kleinanzeigen.de/s-notebooks/c278')
+
+            primary_proxy = _proxy_for_worker(0)
+            proxy_attempts: list[Optional[Dict[str, str]]] = []
+            if primary_proxy:
+                proxy_attempts.append(primary_proxy)
+                for candidate in proxy_pool:
+                    if candidate is not primary_proxy:
+                        proxy_attempts.append(candidate)
+            proxy_attempts.append(None)  # Always allow fallback to direct.
+
+            last_open_error: Optional[Exception] = None
+            for attempt_proxy in proxy_attempts:
+                scraper = KleinanzeigenScraper(**scraper_kwargs, proxy=attempt_proxy)
+                try:
+                    with scraper.open_page() as page:
+                        robots_checker.fetch_robots(page)
+
+                        for idx, (category, keyword) in enumerate(tasks):
+                            elapsed = time.time() - start_time
+                            current_display = _display_for_task(category, keyword)
+                            if keyword:
+                                keywords_processed.add(keyword)
+
+                            _save_job_progress(job, {
+                                'status': 'running',
+                                'current_keyword': current_display,
+                                'keyword_index': idx,
+                                'total_keywords': total_tasks,
+                                'listings_found': len(listings_by_id),
+                                'elapsed_seconds': int(elapsed),
+                                'message': f"Scraping: {current_display}",
+                                'concurrency': 1,
+                            })
+
+                            try:
+                                task_listings, pages_scraped_local = _scrape_task(
+                                    page, scraper, robots_checker, category, keyword
+                                )
+                                total_pages_scraped += pages_scraped_local
+                                _merge_task_results(category, keyword, task_listings)
+
+                                logger.info(
+                                    f"Task {idx + 1}/{total_tasks}: {len(task_listings)} listings, {len(listings_by_id)} unique total"
+                                )
+                            except Exception as e:
+                                logger.error(f"Error scraping category={category} keyword='{keyword}': {e}")
+                                continue
+
+                    last_open_error = None
+                    break
+                except Exception as e:
+                    last_open_error = e
+                    proxy_label = attempt_proxy.get('server') if attempt_proxy else 'direct'
+                    logger.warning(f"Playwright launch/navigation failed via proxy={proxy_label}: {e}")
+                    continue
+
+            if last_open_error is not None:
+                raise last_open_error
+        else:
+            # Multi-worker mode: run tasks in parallel using N isolated Playwright instances.
+            task_queue: queue.Queue = queue.Queue()
+            result_queue: queue.Queue = queue.Queue()
+            workers: list[Thread] = []
+
+            for idx, (category, keyword) in enumerate(tasks):
+                task_queue.put((idx, category, keyword))
+
+            for _ in range(concurrency):
+                task_queue.put(None)
+
+            def worker(worker_id: int) -> None:
+                assigned_proxy = _proxy_for_worker(worker_id)
+                proxy_attempts: list[Optional[Dict[str, str]]] = []
+                if assigned_proxy:
+                    proxy_attempts.append(assigned_proxy)
+                    for candidate in proxy_pool:
+                        if candidate is not assigned_proxy:
+                            proxy_attempts.append(candidate)
+                proxy_attempts.append(None)  # Always allow fallback to direct.
+
+                last_error: Optional[Exception] = None
+                try:
+                    for attempt_proxy in proxy_attempts:
+                        worker_scraper = KleinanzeigenScraper(**scraper_kwargs, proxy=attempt_proxy)
+                        proxy_label = attempt_proxy.get('server') if attempt_proxy else 'direct'
+                        try:
+                            with worker_scraper.open_page() as page:
+                                worker_robots = RobotsChecker('https://www.kleinanzeigen.de/s-notebooks/c278')
+                                worker_robots.fetch_robots(page)
+
+                                while True:
+                                    task = task_queue.get()
+                                    if task is None:
+                                        break
+                                    idx, category, keyword = task
+                                    result_queue.put({
+                                        'event': 'task_started',
+                                        'idx': idx,
+                                        'category': category,
+                                        'keyword': keyword,
+                                        'worker_id': worker_id,
+                                        'proxy': proxy_label,
+                                    })
+                                    try:
+                                        task_listings, pages_scraped_local = _scrape_task(
+                                            page, worker_scraper, worker_robots, category, keyword
+                                        )
+                                        result_queue.put({
+                                            'event': 'task_completed',
+                                            'idx': idx,
+                                            'category': category,
+                                            'keyword': keyword,
+                                            'pages_scraped': pages_scraped_local,
+                                            'listings': task_listings,
+                                            'worker_id': worker_id,
+                                            'proxy': proxy_label,
+                                        })
+                                    except Exception as e:
+                                        result_queue.put({
+                                            'event': 'task_error',
+                                            'idx': idx,
+                                            'category': category,
+                                            'keyword': keyword,
+                                            'error': str(e),
+                                            'worker_id': worker_id,
+                                            'proxy': proxy_label,
+                                        })
+
+                            last_error = None
+                            break
+                        except Exception as e:
+                            last_error = e
+                            result_queue.put({
+                                'event': 'worker_proxy_failed',
+                                'worker_id': worker_id,
+                                'proxy': proxy_label,
+                                'error': str(e),
+                            })
+                            continue
+
+                    if last_error is not None:
+                        result_queue.put({'event': 'worker_error', 'worker_id': worker_id, 'error': str(last_error)})
+                finally:
+                    result_queue.put({'event': 'worker_done', 'worker_id': worker_id})
+
+            for worker_id in range(concurrency):
+                t = Thread(target=worker, args=(worker_id,), daemon=True)
+                t.start()
+                workers.append(t)
+
+            tasks_done = 0
+            workers_done = 0
+
+            while workers_done < concurrency:
+                msg = result_queue.get()
+                event = msg.get('event')
+
+                if event == 'worker_done':
+                    workers_done += 1
+                    continue
+
+                if event == 'worker_error':
+                    logger.error(f"Worker {msg.get('worker_id')} failed: {msg.get('error')}")
+                    continue
+
+                if event == 'task_started':
+                    elapsed = time.time() - start_time
+                    current_display = _display_for_task(msg['category'], msg['keyword'])
+                    if msg.get('keyword'):
+                        keywords_processed.add(msg['keyword'])
+                    _save_job_progress(job, {
+                        'status': 'running',
+                        'current_keyword': current_display,
+                        'keyword_index': tasks_done,
+                        'total_keywords': total_tasks,
+                        'listings_found': len(listings_by_id),
+                        'elapsed_seconds': int(elapsed),
+                        'message': f"Scraping: {current_display}",
+                        'concurrency': concurrency,
+                    })
+                    continue
+
+                if event == 'task_error':
+                    tasks_done += 1
+                    logger.error(
+                        f"Error scraping category={msg.get('category')} keyword='{msg.get('keyword')}': {msg.get('error')}"
+                    )
+                    elapsed = time.time() - start_time
+                    _save_job_progress(job, {
+                        'status': 'running',
+                        'current_keyword': _display_for_task(msg['category'], msg['keyword']),
+                        'keyword_index': tasks_done,
+                        'total_keywords': total_tasks,
+                        'listings_found': len(listings_by_id),
+                        'elapsed_seconds': int(elapsed),
+                        'message': f"Task failed: {_display_for_task(msg['category'], msg['keyword'])}",
+                        'concurrency': concurrency,
+                    })
+                    continue
+
+                if event == 'task_completed':
+                    tasks_done += 1
+                    total_pages_scraped += int(msg.get('pages_scraped') or 0)
+                    _merge_task_results(msg['category'], msg['keyword'], msg.get('listings') or [])
+
+                    elapsed = time.time() - start_time
+                    _save_job_progress(job, {
+                        'status': 'running',
+                        'current_keyword': _display_for_task(msg['category'], msg['keyword']),
+                        'keyword_index': tasks_done,
+                        'total_keywords': total_tasks,
+                        'listings_found': len(listings_by_id),
+                        'elapsed_seconds': int(elapsed),
+                        'message': f"Completed {tasks_done}/{total_tasks} tasks",
+                        'concurrency': concurrency,
+                    })
+
+            for t in workers:
+                t.join(timeout=1)
+
+        # Process all collected results (unique by external_id)
+        new_count = 0
+        updated_count = 0
+
+        for ext_id, listing_info in listings_by_id.items():
+            listing_data = listing_info['data']
+            keywords_set = listing_info['keywords']
+            keywords_str = ','.join(sorted(keywords_set)) if keywords_set else ''
+            new_price_cents = int(listing_data['price'] * 100) if listing_data.get('price') else None
+            item_type = classify_item_type(listing_data.get('title', ''), listing_data.get('description'))
+
+            existing = Listing.query.filter_by(external_id=ext_id).first()
+            if existing:
+                # Track price history if price changed
+                if existing.price_eur != new_price_cents:
+                    db.session.add(PriceHistory(listing_id=existing.id, price=new_price_cents))
+
+                existing.title = listing_data['title']
+                existing.price_eur = new_price_cents
+                existing.price_negotiable = listing_data['price_negotiable']
+                existing.location_city = listing_data['city']
+                existing.location_state = listing_data['state']
+                existing.description = listing_data['description']
+                existing.condition = listing_data['condition']
+                existing.image_url = listing_data['image_url']
+                existing.item_type = item_type
+                existing.updated_at = datetime.utcnow()
+
+                # Merge keywords
+                if existing.search_keywords:
+                    existing_keywords = {k.strip() for k in existing.search_keywords.split(',') if k.strip()}
+                    merged_keywords = existing_keywords | keywords_set
+                    existing.search_keywords = ','.join(sorted(merged_keywords))
+                else:
+                    existing.search_keywords = keywords_str
+
+                updated_count += 1
+            else:
+                listing_data['item_type'] = item_type
+                new_listing = Listing.from_scraped_dict(listing_data)
+                new_listing.search_keywords = keywords_str
+                db.session.add(new_listing)
+                db.session.flush()  # Get the ID
+
+                # Add initial price to history
+                if new_price_cents is not None:
+                    db.session.add(PriceHistory(listing_id=new_listing.id, price=new_price_cents))
+
+                new_count += 1
+
+        db.session.commit()
+
+        # Update job status
+        job.status = 'completed'
+        job.completed_at = datetime.utcnow()
+        job.pages_scraped = total_pages_scraped
+        job.listings_found = len(listings_by_id)
+        job.listings_new = new_count
+        job.listings_updated = updated_count
+        db.session.commit()
+
+        elapsed = time.time() - start_time
+        _save_job_progress(job, {
+            'status': 'completed',
+            'current_keyword': 'done',
+            'keyword_index': total_tasks,
+            'total_keywords': total_tasks,
+            'listings_found': len(listings_by_id),
+            'elapsed_seconds': int(elapsed),
+            'message': f'Completed! {new_count} new, {updated_count} updated.',
+            'new_count': new_count,
+            'updated_count': updated_count,
+        }, completed=True)
+
+        keywords_summary = ', '.join(sorted(keywords_processed)) if keywords_processed else 'all'
+        logger.info(
+            f"Scraper job {job.id} completed: {new_count} new, {updated_count} updated (keywords: {keywords_summary})"
+        )
+
+        return {
+            'job': job.to_dict(),
+            'keywords_processed': sorted(keywords_processed),
+            'message': f'Scraping completed for {len(keywords_processed) or 1} keyword(s). {new_count} new listings, {updated_count} updated.',
+        }
     @app.route('/api/v1/scraper/jobs', methods=['GET'])
     @app.route('/api/v1/scraper/jobs/', methods=['GET'])
     def get_scraper_jobs():
@@ -367,228 +956,111 @@ def register_routes(app: Flask):
         Returns:
             JSON response with job ID and status.
         
+        Optional streaming mode:
+            If request includes {"stream": true}, the job runs in a background thread
+            and this endpoint returns immediately with HTTP 202. Progress can be
+            observed via the SSE endpoint: /api/v1/scraper/jobs/{id}/progress
+
         Note:
             In production, this should require admin authentication.
-            The actual scraping runs synchronously for simplicity;
-            consider using Celery for background processing.
         """
         data = request.get_json() or {}
-        
-        # Get admin config for scraper settings
+        stream = bool(data.get('stream', False))
+
+        # Get admin config for default settings
         admin_config = ScraperConfig.get_config()
-        
-        page_limit = data.get('page_limit', admin_config.page_limit)
-        
-        # Parse keywords into list (each will be searched separately)
-        keywords_raw = admin_config.keywords.strip() if admin_config.keywords else ''
-        keywords_list = [k.strip() for k in keywords_raw.split(',') if k.strip()]
-        
-        # Get city and category settings
-        city_slug = admin_config.city.strip() if admin_config.city else ''
-        category = admin_config.categories.split(',')[0].strip() if admin_config.categories else 'c278'
-        
-        # Build base URL (without keywords)
-        if city_slug:
-            base_url_template = f"https://www.kleinanzeigen.de/s-notebooks/{city_slug}/{category}"
-        else:
-            base_url_template = f"https://www.kleinanzeigen.de/s-notebooks/{category}"
-        
+        page_limit_raw = data.get('page_limit', admin_config.page_limit)
+        concurrency_raw = data.get('concurrency', app.config.get('SCRAPER_CONCURRENCY', 1))
+
+        try:
+            page_limit = int(page_limit_raw)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid page_limit'}), 400
+
+        if page_limit < 1 or page_limit > 50:
+            return jsonify({'error': 'Page limit must be between 1 and 50'}), 400
+
+        try:
+            concurrency = int(concurrency_raw)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid concurrency'}), 400
+
+        if concurrency < 1 or concurrency > 4:
+            return jsonify({'error': 'Concurrency must be between 1 and 4'}), 400
+
         # Create job record
         job = ScraperJob(status='running', started_at=datetime.utcnow())
         db.session.add(job)
         db.session.commit()
-        
-        # Track start time for progress
-        import time
-        start_time = time.time()
-        
-        try:
-            # Track listings by external_id with their keywords
-            listings_by_id = {}  # {external_id: {'data': listing_data, 'keywords': set()}}
-            total_pages_scraped = 0
-            keywords_processed = []
-            
-            # If no keywords, scrape base URL once
-            if not keywords_list:
-                keywords_list = ['']  # Empty string = no keyword filter
-            
-            total_keywords = len(keywords_list)
-            
-            for idx, keyword in enumerate(keywords_list):
-                # Publish progress via SSE
-                elapsed = time.time() - start_time
-                progress_manager.publish(job.id, {
-                    'status': 'running',
-                    'current_keyword': keyword or 'all',
-                    'keyword_index': idx,
-                    'total_keywords': total_keywords,
-                    'listings_found': len(listings_by_id),
-                    'elapsed_seconds': int(elapsed),
-                    'message': f"Scraping keyword: {keyword or 'all notebooks'}",
-                })
-                
-                # Build URL for this keyword
-                if keyword:
-                    # URL encode the keyword (spaces become +)
-                    keyword_encoded = keyword.replace(' ', '+')
-                    scrape_url = f"{base_url_template}?keywords={keyword_encoded}"
-                    keywords_processed.append(keyword)
-                else:
-                    scrape_url = base_url_template
-                
-                logger.info(f"Scraping keyword: '{keyword}' - URL: {scrape_url}")
-                
+
+        # Initial progress (so SSE has something immediately)
+        _save_job_progress(job, {
+            'status': 'running',
+            'current_keyword': '',
+            'keyword_index': 0,
+            'total_keywords': 0,
+            'listings_found': 0,
+            'elapsed_seconds': 0,
+            'message': 'Starting scraper...',
+            'concurrency': concurrency,
+        })
+
+        def runner():
+            with app.app_context():
                 try:
-                    # Initialize scraper for this keyword
-                    scraper = KleinanzeigenScraper(
-                        base_url=scrape_url,
-                        delay_seconds=app.config['SCRAPER_DELAY_SECONDS'],
-                        page_limit=page_limit,
-                        browser_type=app.config['PLAYWRIGHT_BROWSER'],
-                    )
-                    
-                    # Run scraper for this keyword
-                    listings_data = scraper.scrape()
-                    total_pages_scraped += page_limit
-                    
-                    # Track listings and their associated keywords
-                    for listing in listings_data:
-                        ext_id = listing.get('external_id')
-                        if ext_id:
-                            if ext_id not in listings_by_id:
-                                # First time seeing this listing
-                                listings_by_id[ext_id] = {
-                                    'data': listing,
-                                    'keywords': set()
-                                }
-                            # Add this keyword to the listing's keyword set
-                            if keyword:
-                                listings_by_id[ext_id]['keywords'].add(keyword)
-                    
-                    logger.info(f"Keyword '{keyword}': found {len(listings_data)} listings, {len(listings_by_id)} unique total")
-                    
+                    _run_scraper_job(job.id, page_limit_override=page_limit, concurrency_override=concurrency)
                 except Exception as e:
-                    logger.error(f"Error scraping keyword '{keyword}': {e}")
-                    # Continue with next keyword instead of failing entire job
-                    continue
-            
-            # Process all collected results (now unique by external_id)
-            new_count = 0
-            updated_count = 0
-            
-            for ext_id, listing_info in listings_by_id.items():
-                listing_data = listing_info['data']
-                keywords_set = listing_info['keywords']
-                keywords_str = ','.join(sorted(keywords_set)) if keywords_set else ''
-                new_price_cents = int(listing_data['price'] * 100) if listing_data['price'] else None
-                
-                existing = Listing.query.filter_by(
-                    external_id=ext_id
-                ).first()
-                
-                if existing:
-                    # Track price history if price changed
-                    if existing.price_eur != new_price_cents:
-                        price_entry = PriceHistory(
-                            listing_id=existing.id,
-                            price=new_price_cents
-                        )
-                        db.session.add(price_entry)
-                    
-                    # Update existing listing
-                    existing.title = listing_data['title']
-                    existing.price_eur = new_price_cents
-                    existing.price_negotiable = listing_data['price_negotiable']
-                    existing.location_city = listing_data['city']
-                    existing.location_state = listing_data['state']
-                    existing.description = listing_data['description']
-                    existing.condition = listing_data['condition']
-                    existing.image_url = listing_data['image_url']
-                    existing.updated_at = datetime.utcnow()
-                    # Merge keywords: add new keywords to existing ones
-                    if existing.search_keywords:
-                        existing_keywords = set(k.strip() for k in existing.search_keywords.split(',') if k.strip())
-                        merged_keywords = existing_keywords | keywords_set
-                        existing.search_keywords = ','.join(sorted(merged_keywords))
-                    else:
-                        existing.search_keywords = keywords_str
-                    updated_count += 1
-                else:
-                    # Create new listing with keywords
-                    new_listing = Listing.from_scraped_dict(listing_data)
-                    new_listing.search_keywords = keywords_str
-                    db.session.add(new_listing)
-                    db.session.flush()  # Get the ID
-                    
-                    # Add initial price to history
-                    if new_price_cents is not None:
-                        price_entry = PriceHistory(
-                            listing_id=new_listing.id,
-                            price=new_price_cents
-                        )
-                        db.session.add(price_entry)
-                    
-                    new_count += 1
-            
-            db.session.commit()
-            
-            # Publish final progress via SSE
-            elapsed = time.time() - start_time
-            progress_manager.complete(job.id, {
-                'status': 'completed',
-                'current_keyword': 'done',
-                'keyword_index': total_keywords,
-                'total_keywords': total_keywords,
-                'listings_found': len(listings_by_id),
-                'elapsed_seconds': int(elapsed),
-                'message': f'Completed! {new_count} new, {updated_count} updated.',
-                'new_count': new_count,
-                'updated_count': updated_count,
-            })
-            
-            # Update job status
-            job.status = 'completed'
-            job.completed_at = datetime.utcnow()
-            job.pages_scraped = total_pages_scraped
-            job.listings_found = len(listings_by_id)
-            job.listings_new = new_count
-            job.listings_updated = updated_count
-            db.session.commit()
-            
-            keywords_summary = ', '.join(keywords_processed) if keywords_processed else 'all'
-            logger.info(f"Scraper job {job.id} completed: {new_count} new, {updated_count} updated (keywords: {keywords_summary})")
-            
+                    logger.error(f"Scraper job {job.id} failed: {e}")
+                    failed_job = ScraperJob.query.get(job.id)
+                    if not failed_job:
+                        return
+                    failed_job.status = 'failed'
+                    failed_job.completed_at = datetime.utcnow()
+                    failed_job.error_message = str(e)
+                    db.session.commit()
+                    _save_job_progress(failed_job, {
+                        'status': 'failed',
+                        'current_keyword': '',
+                        'keyword_index': 0,
+                        'total_keywords': 0,
+                        'listings_found': failed_job.listings_found or 0,
+                        'elapsed_seconds': 0,
+                        'message': f'Failed: {str(e)}',
+                        'error': str(e),
+                    }, completed=True)
+
+        if stream:
+            Thread(target=runner, daemon=True).start()
             return jsonify({
                 'data': job.to_dict(),
-                'message': f'Scraping completed for {len(keywords_processed)} keyword(s). {new_count} new listings, {updated_count} updated.',
-                'keywords_processed': keywords_processed
+                'message': 'Scraper job started',
+            }), 202
+
+        # Synchronous mode (blocks until completion)
+        try:
+            result = _run_scraper_job(job.id, page_limit_override=page_limit, concurrency_override=concurrency)
+            return jsonify({
+                'data': result.get('job', job.to_dict()),
+                'message': result.get('message', 'Scraping completed'),
+                'keywords_processed': result.get('keywords_processed', []),
             }), 201
-            
         except Exception as e:
             logger.error(f"Scraper job {job.id} failed: {e}")
-            
-            # Publish failure via SSE
-            elapsed = time.time() - start_time
-            progress_manager.complete(job.id, {
-                'status': 'failed',
-                'current_keyword': '',
-                'keyword_index': 0,
-                'total_keywords': len(keywords_list) if 'keywords_list' in dir() else 0,
-                'listings_found': len(listings_by_id) if 'listings_by_id' in dir() else 0,
-                'elapsed_seconds': int(elapsed),
-                'message': f'Failed: {str(e)}',
-                'error': str(e),
-            })
-            
             job.status = 'failed'
             job.completed_at = datetime.utcnow()
             job.error_message = str(e)
             db.session.commit()
-            
-            return jsonify({
-                'data': job.to_dict(),
-                'error': str(e)
-            }), 500
+            _save_job_progress(job, {
+                'status': 'failed',
+                'current_keyword': '',
+                'keyword_index': 0,
+                'total_keywords': 0,
+                'listings_found': job.listings_found or 0,
+                'elapsed_seconds': 0,
+                'message': f'Failed: {str(e)}',
+                'error': str(e),
+            }, completed=True)
+            return jsonify({'data': job.to_dict(), 'error': str(e)}), 500
     
     @app.route('/api/v1/scraper/jobs/<int:job_id>', methods=['GET'])
     def get_scraper_job(job_id: int):
@@ -615,16 +1087,72 @@ def register_routes(app: Flask):
         Returns:
             SSE stream with progress updates.
         """
-        job = ScraperJob.query.get_or_404(job_id)
-        
-        # If job is already completed, return final status immediately
-        if job.status in ('completed', 'failed'):
-            return jsonify({
-                'data': job.to_dict(),
-                'completed': True
-            })
-        
-        return create_sse_response(job_id)
+        ScraperJob.query.get_or_404(job_id)
+
+        def generate():
+            yield f"event: connected\ndata: {json.dumps({'job_id': job_id})}\n\n"
+
+            last_payload: Optional[str] = None
+            last_activity = time.time()
+
+            while True:
+                # Ensure we see the latest committed progress from any worker/thread.
+                db.session.remove()
+                job = ScraperJob.query.get(job_id)
+                if not job:
+                    yield f"event: error\ndata: {json.dumps({'error': 'Job not found'})}\n\n"
+                    break
+
+                progress = None
+                if job.progress_json:
+                    try:
+                        progress = json.loads(job.progress_json)
+                    except Exception:
+                        progress = None
+
+                if not progress:
+                    progress = {
+                        'status': job.status,
+                        'current_keyword': '',
+                        'keyword_index': 0,
+                        'total_keywords': 0,
+                        'listings_found': job.listings_found or 0,
+                        'elapsed_seconds': 0,
+                        'message': 'Waiting for progress...',
+                        'timestamp': datetime.utcnow().isoformat(),
+                    }
+
+                completed = bool(progress.get('completed')) or job.status in ('completed', 'failed')
+                if completed:
+                    progress['completed'] = True
+                    progress.setdefault('new_count', job.listings_new)
+                    progress.setdefault('updated_count', job.listings_updated)
+                    if job.status == 'failed':
+                        progress.setdefault('error', job.error_message or 'Failed')
+
+                payload = json.dumps(progress, ensure_ascii=False)
+                if payload != last_payload:
+                    event_type = 'complete' if completed else 'progress'
+                    yield f"event: {event_type}\ndata: {payload}\n\n"
+                    last_payload = payload
+                    last_activity = time.time()
+                    if completed:
+                        break
+                elif time.time() - last_activity >= 30:
+                    yield f"event: ping\ndata: {json.dumps({'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                    last_activity = time.time()
+
+                time.sleep(1)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'X-Accel-Buffering': 'no',
+            },
+        )
     
     # Admin config endpoints
     @app.route('/api/v1/admin/config', methods=['GET'])
@@ -699,13 +1227,9 @@ def register_routes(app: Flask):
         Returns:
             JSON response with predefined category options.
         """
-        # Predefined categories relevant to notebook scraping
         categories = [
-            {'code': 'c278', 'name': 'Notebooks', 'description': 'Notebook/Laptop computers'},
-            {'code': 'c225', 'name': 'PCs', 'description': 'Desktop computers'},
-            {'code': 'c285', 'name': 'Tablets & Reader', 'description': 'Tablets and E-Readers'},
-            {'code': 'c161', 'name': 'Elektronik', 'description': 'All electronics'},
-            {'code': 'c228', 'name': 'PC Zubehör & Software', 'description': 'PC accessories and software'},
+            {'code': code, 'slug': meta['slug'], 'name': meta['name'], 'description': meta['description']}
+            for code, meta in CATEGORY_DEFINITIONS.items()
         ]
         return jsonify({'data': categories})
     

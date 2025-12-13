@@ -125,7 +125,7 @@ export function useScraperWithProgress() {
     },
   })
 
-  const startScraper = useCallback(async (pageLimit?: number) => {
+  const startScraper = useCallback(async (pageLimit?: number, concurrency?: number) => {
     setIsStarting(true)
     setResult(null)
     
@@ -134,7 +134,7 @@ export function useScraperWithProgress() {
       const response = await fetch(`${baseUrl}/scraper/jobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ page_limit: pageLimit, stream: true }),
+        body: JSON.stringify({ page_limit: pageLimit, concurrency, stream: true }),
       })
       
       const data = await response.json()

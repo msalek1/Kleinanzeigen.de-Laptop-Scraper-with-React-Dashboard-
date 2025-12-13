@@ -8,11 +8,12 @@ Handles race conditions by using advisory locks.
 
 import sys
 import time
-from sqlalchemy import text
+from sqlalchemy import text, inspect
 from sqlalchemy.exc import IntegrityError, ProgrammingError, OperationalError
 
 from app import create_app
-from models import db, ScraperConfig
+from classifier import classify_item_type
+from models import db, ScraperConfig, Listing, PriceHistory
 
 
 def wait_for_db(app, max_retries=30, delay=1):
@@ -60,43 +61,74 @@ def apply_migrations(app):
     """Apply any pending schema migrations."""
     with app.app_context():
         try:
+            inspector = inspect(db.engine)
+            added_item_type = False
+
+            def has_table(table_name: str) -> bool:
+                try:
+                    return table_name in inspector.get_table_names()
+                except Exception:
+                    return False
+
+            def has_column(table_name: str, column_name: str) -> bool:
+                try:
+                    return any(c.get('name') == column_name for c in inspector.get_columns(table_name))
+                except Exception:
+                    return False
+
             # Migration 1: Add search_keywords column to listings if it doesn't exist
-            result = db.session.execute(text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.columns 
-                    WHERE table_name = 'listings' AND column_name = 'search_keywords'
-                )
-            """))
-            has_search_keywords = result.scalar()
-            
-            if not has_search_keywords:
+            if has_table('listings') and not has_column('listings', 'search_keywords'):
                 print("Adding search_keywords column to listings table...")
                 db.session.execute(text("ALTER TABLE listings ADD COLUMN search_keywords TEXT"))
                 db.session.commit()
                 print("search_keywords column added successfully")
-            
-            # Migration 2: Create price_history table if it doesn't exist
-            result = db.session.execute(text("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'price_history'
-                )
-            """))
-            has_price_history = result.scalar()
-            
-            if not has_price_history:
+
+            # Migration 2: Add item_type column to listings if it doesn't exist
+            if has_table('listings') and not has_column('listings', 'item_type'):
+                print("Adding item_type column to listings table...")
+                db.session.execute(text("ALTER TABLE listings ADD COLUMN item_type VARCHAR(20)"))
+                db.session.commit()
+                print("item_type column added successfully")
+                added_item_type = True
+
+                # Optional index for faster filtering
+                try:
+                    db.session.execute(text("CREATE INDEX IF NOT EXISTS idx_listings_item_type ON listings(item_type)"))
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
+            # Migration 3: Create price_history table if it doesn't exist
+            if not has_table('price_history'):
                 print("Creating price_history table...")
-                db.session.execute(text("""
-                    CREATE TABLE price_history (
-                        id SERIAL PRIMARY KEY,
-                        listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
-                        price INTEGER,
-                        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
-                    )
-                """))
-                db.session.execute(text("CREATE INDEX idx_price_history_listing ON price_history(listing_id)"))
+                db.metadata.create_all(db.engine, tables=[PriceHistory.__table__], checkfirst=True)
                 db.session.commit()
                 print("price_history table created successfully")
+
+            # Migration 4: Add progress_json column to scraper_jobs if it doesn't exist
+            if has_table('scraper_jobs') and not has_column('scraper_jobs', 'progress_json'):
+                print("Adding progress_json column to scraper_jobs table...")
+                db.session.execute(text("ALTER TABLE scraper_jobs ADD COLUMN progress_json TEXT"))
+                db.session.commit()
+                print("progress_json column added successfully")
+
+            # Data migration: backfill item_type for existing rows
+            if has_table('listings') and (added_item_type or has_column('listings', 'item_type')):
+                try:
+                    # Refresh inspector cache (important after ALTER TABLE on some backends)
+                    inspector = inspect(db.engine)
+                    missing = Listing.query.filter(
+                        (Listing.item_type.is_(None)) | (Listing.item_type == '')
+                    ).limit(5000).all()
+                    if missing:
+                        print(f"Backfilling item_type for {len(missing)} listings...")
+                        for listing in missing:
+                            listing.item_type = classify_item_type(listing.title or '', listing.description)
+                        db.session.commit()
+                        print("item_type backfill complete")
+                except Exception as e:
+                    print(f"Note: Could not backfill item_type: {e}")
+                    db.session.rollback()
             
         except Exception as e:
             print(f"Note: Could not apply migrations (may be SQLite or column exists): {e}")

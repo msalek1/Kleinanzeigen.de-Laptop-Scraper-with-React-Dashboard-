@@ -32,7 +32,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
     if (debouncedSearch !== (filters.q || '')) {
       onFilterChange({ ...filters, q: debouncedSearch || undefined, page: 1 })
     }
-  }, [debouncedSearch])
+  }, [debouncedSearch, filters, onFilterChange])
   
   // Apply debounced price filters
   useEffect(() => {
@@ -40,21 +40,21 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
     if (newMinPrice !== filters.min_price) {
       onFilterChange({ ...filters, min_price: newMinPrice, page: 1 })
     }
-  }, [debouncedMinPrice])
+  }, [debouncedMinPrice, filters, onFilterChange])
   
   useEffect(() => {
     const newMaxPrice = debouncedMaxPrice ? Number(debouncedMaxPrice) : undefined
     if (newMaxPrice !== filters.max_price) {
       onFilterChange({ ...filters, max_price: newMaxPrice, page: 1 })
     }
-  }, [debouncedMaxPrice])
+  }, [debouncedMaxPrice, filters, onFilterChange])
   
   // Apply debounced location filter
   useEffect(() => {
     if (debouncedLocation !== (filters.location || '')) {
       onFilterChange({ ...filters, location: debouncedLocation || undefined, page: 1 })
     }
-  }, [debouncedLocation])
+  }, [debouncedLocation, filters, onFilterChange])
   
   const handleSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault()
@@ -75,10 +75,17 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
     setMinPrice('')
     setMaxPrice('')
     setLocation('')
-    onFilterChange({ page: 1, per_page: filters.per_page })
-  }, [filters.per_page, onFilterChange])
+    onFilterChange({ page: 1, per_page: filters.per_page, item_type: filters.item_type })
+  }, [filters.item_type, filters.per_page, onFilterChange])
   
-  const hasActiveFilters = filters.q || filters.min_price || filters.max_price || filters.location || filters.condition
+  const hasActiveFilters = (
+    filters.q ||
+    filters.min_price ||
+    filters.max_price ||
+    filters.location ||
+    filters.condition ||
+    (filters.item_type && filters.item_type !== 'laptop')
+  )
   
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 mb-6 transition-all duration-300 hover:shadow-md">
@@ -90,7 +97,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
             type="text"
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
-            placeholder="Search notebooks..."
+            placeholder="Search laptops..."
             className="w-full pl-10 pr-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-500 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
           />
         </div>
@@ -128,7 +135,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
             className="overflow-hidden"
           >
             <div className="pt-4 mt-2 border-t border-gray-200 dark:border-gray-700">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
                 {/* Price range */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
@@ -184,6 +191,23 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                     <option value="">Any</option>
                     <option value="Neu">New</option>
                     <option value="Gebraucht">Used</option>
+                  </select>
+                </div>
+
+                {/* Focus */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    Focus
+                  </label>
+                  <select
+                    value={filters.item_type || 'laptop'}
+                    onChange={(e) => handleFilterChange('item_type', (e.target.value || undefined) as ListingsParams['item_type'])}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                  >
+                    <option value="laptop">Laptops</option>
+                    <option value="all">All</option>
+                    <option value="accessory">Accessories</option>
+                    <option value="other">Other</option>
                   </select>
                 </div>
               </div>

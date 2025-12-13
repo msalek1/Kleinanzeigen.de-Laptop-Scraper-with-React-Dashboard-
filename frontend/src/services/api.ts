@@ -31,6 +31,7 @@ export interface Listing {
   image_url: string | null
   seller_type: string | null
   search_keywords: string[]
+  item_type: string | null
   price_history?: PriceHistoryEntry[]
 }
 
@@ -97,6 +98,7 @@ export interface ListingsParams {
   location?: string
   condition?: string
   keyword?: string
+  item_type?: 'laptop' | 'accessory' | 'other' | 'all'
   sort?: 'price' | 'posted_at' | 'scraped_at' | 'title'
   order?: 'asc' | 'desc'
 }
@@ -287,7 +289,7 @@ export const scraperApi = {
    * Trigger a new scraper job.
    * Uses extended timeout since scraping multiple keywords can take several minutes.
    */
-  triggerJob: async (options: { page_limit?: number } = {}): Promise<ScraperJobResponse> => {
+  triggerJob: async (options: { page_limit?: number; concurrency?: number } = {}): Promise<ScraperJobResponse> => {
     const response = await apiClient.post<ScraperJobResponse>('/scraper/jobs', options, {
       timeout: 600000  // 10 minute timeout for scraper jobs
     })

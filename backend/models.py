@@ -32,6 +32,7 @@ class Listing(db.Model):
         updated_at: Last time this record was updated.
         image_url: URL to the listing's main image.
         seller_type: Private or commercial seller.
+        item_type: Heuristic classification (laptop, accessory, other).
         raw_html: Optional raw HTML for debugging (not stored by default).
         price_history: Relationship to price history records.
     """
@@ -66,6 +67,9 @@ class Listing(db.Model):
     
     # Keywords that matched this listing (comma-separated)
     search_keywords = db.Column(db.Text, nullable=True)
+
+    # Heuristic classification to support laptop-focused views
+    item_type = db.Column(db.String(20), nullable=True, index=True)
     
     # Debug field - not populated by default
     raw_html = db.Column(db.Text, nullable=True)
@@ -109,6 +113,7 @@ class Listing(db.Model):
             'image_url': self.image_url,
             'seller_type': self.seller_type,
             'search_keywords': keywords_list,
+            'item_type': self.item_type,
         }
         
         # Include price history if requested
@@ -162,6 +167,7 @@ class Listing(db.Model):
             posted_at=data.get('posted_at'),
             image_url=data.get('image_url'),
             seller_type=data.get('seller_type'),
+            item_type=data.get('item_type'),
         )
 
 
@@ -286,6 +292,8 @@ class ScraperJob(db.Model):
     listings_new = db.Column(db.Integer, default=0)
     listings_updated = db.Column(db.Integer, default=0)
     error_message = db.Column(db.Text, nullable=True)
+    # Optional JSON string with live progress data (for SSE/polling)
+    progress_json = db.Column(db.Text, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def __repr__(self) -> str:
@@ -303,5 +311,6 @@ class ScraperJob(db.Model):
             'listings_new': self.listings_new,
             'listings_updated': self.listings_updated,
             'error_message': self.error_message,
+            'progress_json': self.progress_json,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }

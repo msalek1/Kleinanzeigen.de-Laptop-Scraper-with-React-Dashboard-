@@ -32,11 +32,14 @@ class Config:
     )
     SCRAPER_PAGE_LIMIT = int(os.environ.get('SCRAPER_PAGE_LIMIT', '5'))
     SCRAPER_DELAY_SECONDS = float(os.environ.get('SCRAPER_DELAY_SECONDS', '3.0'))
+    SCRAPER_CONCURRENCY = int(os.environ.get('SCRAPER_CONCURRENCY', '1'))
     PLAYWRIGHT_BROWSER = os.environ.get('PLAYWRIGHT_BROWSER', 'chromium')
     
     # Proxy settings (optional)
     HTTP_PROXY = os.environ.get('HTTP_PROXY')
     HTTPS_PROXY = os.environ.get('HTTPS_PROXY')
+    SCRAPER_PROXY_URLS = os.environ.get('SCRAPER_PROXY_URLS', '')
+    SCRAPER_PROXY_LIST_URL = os.environ.get('SCRAPER_PROXY_LIST_URL', '')
     
     # Rate limiting
     RATELIMIT_DEFAULT = os.environ.get('RATELIMIT_DEFAULT', '100 per hour')
