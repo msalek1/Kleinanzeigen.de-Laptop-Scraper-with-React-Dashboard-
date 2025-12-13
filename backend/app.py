@@ -231,6 +231,43 @@ def register_routes(app: Flask):
             archived_ids = db.session.query(ArchivedListing.listing_id).filter_by(sync_code=sync_code).subquery()
             query = query.filter(~Listing.id.in_(archived_ids))
         
+        # Date period filter (quick presets: today, week, month, 3months, year)
+        from datetime import datetime, timedelta
+        date_period = request.args.get('date_period', '').strip().lower()
+        if date_period:
+            now = datetime.utcnow()
+            period_map = {
+                'today': timedelta(days=1),
+                '3days': timedelta(days=3),
+                'week': timedelta(days=7),
+                '2weeks': timedelta(days=14),
+                'month': timedelta(days=30),
+                '3months': timedelta(days=90),
+                'year': timedelta(days=365),
+            }
+            if date_period in period_map:
+                cutoff_date = now - period_map[date_period]
+                query = query.filter(Listing.posted_at >= cutoff_date)
+        
+        # Custom date range filters (ISO format: YYYY-MM-DD)
+        date_from = request.args.get('date_from', '').strip()
+        if date_from:
+            try:
+                from_date = datetime.strptime(date_from, '%Y-%m-%d')
+                query = query.filter(Listing.posted_at >= from_date)
+            except ValueError:
+                pass  # Invalid date format, ignore
+        
+        date_to = request.args.get('date_to', '').strip()
+        if date_to:
+            try:
+                to_date = datetime.strptime(date_to, '%Y-%m-%d')
+                # Include the entire end day
+                to_date = to_date + timedelta(days=1)
+                query = query.filter(Listing.posted_at < to_date)
+            except ValueError:
+                pass  # Invalid date format, ignore
+        
         # Sorting
         sort_field = request.args.get('sort', 'scraped_at')
         sort_order = request.args.get('order', 'desc')
