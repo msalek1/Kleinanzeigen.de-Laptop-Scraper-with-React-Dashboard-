@@ -14,7 +14,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        // In Docker, set `VITE_PROXY_TARGET=http://backend:5000`
+        // so the dev server can reach the backend container.
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:5000',
         changeOrigin: true,
       },
     },

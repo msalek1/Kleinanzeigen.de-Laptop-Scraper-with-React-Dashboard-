@@ -57,7 +57,9 @@ services:
     depends_on:
       - backend
     environment:
-      VITE_API_URL: http://localhost:5000/api/v1
+      # Use relative API URL so Vite can proxy inside the Docker network.
+      VITE_API_URL: /api/v1
+      VITE_PROXY_TARGET: http://backend:5000
     ports:
       - "5173:5173"
     volumes:

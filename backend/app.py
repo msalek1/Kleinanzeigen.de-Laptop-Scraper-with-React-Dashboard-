@@ -21,8 +21,9 @@ from flask_cors import CORS
 from sqlalchemy import or_
 
 from config import get_config
-from models import db, Listing, ScraperJob, ScraperConfig, PriceHistory
-from classifier import classify_item_type
+from models import db, Listing, ScraperJob, ScraperConfig, PriceHistory, Tag, ArchivedListing, listing_tags
+from classifier import classify_item_type, classify_laptop_category
+from tag_extractor import extract_tags
 from scraper import KleinanzeigenScraper, RobotsChecker
 from sse import progress_manager
 
@@ -197,6 +198,39 @@ def register_routes(app: Flask):
             else:
                 query = query.filter(Listing.item_type == item_type)
         
+        # Laptop category filter (gaming/business/ultrabook/workstation/2in1)
+        laptop_category = request.args.get('laptop_category', '').strip().lower()
+        if laptop_category and laptop_category != 'all':
+            query = query.filter(Listing.laptop_category == laptop_category)
+        
+        # Tags filter (comma-separated tag values)
+        tags_param = request.args.get('tags', '').strip()
+        if tags_param:
+            tag_values = [t.strip() for t in tags_param.split(',') if t.strip()]
+            if tag_values:
+                # Filter listings that have ALL specified tags
+                for tag_value in tag_values:
+                    query = query.filter(
+                        Listing.tags.any(Tag.value.ilike(f'%{tag_value}%'))
+                    )
+        
+        # Brand filter (shorthand for brand tags)
+        brand = request.args.get('brand', '').strip()
+        if brand:
+            brand_values = [b.strip() for b in brand.split(',') if b.strip()]
+            if brand_values:
+                from sqlalchemy import or_ as sql_or
+                brand_filters = [Listing.tags.any(Tag.category == 'brand', Tag.value.ilike(f'%{b}%')) for b in brand_values]
+                query = query.filter(sql_or(*brand_filters))
+        
+        # Exclude archived listings (requires sync_code header)
+        exclude_archived = request.args.get('exclude_archived', '').strip().lower() == 'true'
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if exclude_archived and sync_code:
+            # Get IDs of archived listings for this sync code
+            archived_ids = db.session.query(ArchivedListing.listing_id).filter_by(sync_code=sync_code).subquery()
+            query = query.filter(~Listing.id.in_(archived_ids))
+        
         # Sorting
         sort_field = request.args.get('sort', 'scraped_at')
         sort_order = request.args.get('order', 'desc')
@@ -330,6 +364,377 @@ def register_routes(app: Flask):
                     for city, count in city_counts
                 ],
             }
+        })
+    
+    # =========================================================================
+    # Tags endpoints
+    # =========================================================================
+    
+    @app.route('/api/v1/tags', methods=['GET'])
+    @app.route('/api/v1/tags/', methods=['GET'])
+    def get_tags():
+        """
+        Get all tags with optional category filter.
+        
+        Query Parameters:
+            category (str): Filter by tag category (cpu_model, ram, gpu, brand, etc.)
+        
+        Returns:
+            JSON response with array of tags and their listing counts.
+        """
+        from sqlalchemy import func
+        
+        category = request.args.get('category', '').strip()
+        
+        query = db.session.query(
+            Tag.id,
+            Tag.category,
+            Tag.value,
+            Tag.display_name,
+            func.count(listing_tags.c.listing_id).label('count')
+        ).outerjoin(
+            listing_tags, Tag.id == listing_tags.c.tag_id
+        ).group_by(
+            Tag.id, Tag.category, Tag.value, Tag.display_name
+        )
+        
+        if category:
+            query = query.filter(Tag.category == category)
+        
+        query = query.order_by(func.count(listing_tags.c.listing_id).desc())
+        results = query.all()
+        
+        return jsonify({
+            'data': [
+                {
+                    'id': tag_id,
+                    'category': cat,
+                    'value': val,
+                    'display_name': display or val,
+                    'count': count
+                }
+                for tag_id, cat, val, display, count in results
+            ]
+        })
+    
+    @app.route('/api/v1/tags/popular', methods=['GET'])
+    @app.route('/api/v1/tags/popular/', methods=['GET'])
+    def get_popular_tags():
+        """
+        Get top N most popular tags for quick filters.
+        
+        Query Parameters:
+            limit (int): Number of tags to return (default: 20, max: 50)
+        
+        Returns:
+            JSON response with array of popular tags.
+        """
+        from sqlalchemy import func
+        
+        limit = min(request.args.get('limit', 20, type=int), 50)
+        
+        results = db.session.query(
+            Tag.id,
+            Tag.category,
+            Tag.value,
+            Tag.display_name,
+            func.count(listing_tags.c.listing_id).label('count')
+        ).join(
+            listing_tags, Tag.id == listing_tags.c.tag_id
+        ).group_by(
+            Tag.id, Tag.category, Tag.value, Tag.display_name
+        ).order_by(
+            func.count(listing_tags.c.listing_id).desc()
+        ).limit(limit).all()
+        
+        return jsonify({
+            'data': [
+                {
+                    'id': tag_id,
+                    'category': cat,
+                    'value': val,
+                    'display_name': display or val,
+                    'count': count
+                }
+                for tag_id, cat, val, display, count in results
+            ]
+        })
+    
+    @app.route('/api/v1/tags/categories', methods=['GET'])
+    @app.route('/api/v1/tags/categories/', methods=['GET'])
+    def get_tag_categories():
+        """
+        Get list of available tag categories with counts.
+        
+        Returns:
+            JSON response with array of categories.
+        """
+        from sqlalchemy import func, distinct
+        
+        results = db.session.query(
+            Tag.category,
+            func.count(distinct(Tag.id)).label('tag_count'),
+            func.count(listing_tags.c.listing_id).label('usage_count')
+        ).outerjoin(
+            listing_tags, Tag.id == listing_tags.c.tag_id
+        ).group_by(
+            Tag.category
+        ).order_by(
+            func.count(listing_tags.c.listing_id).desc()
+        ).all()
+        
+        return jsonify({
+            'data': [
+                {
+                    'category': cat,
+                    'tag_count': tag_count,
+                    'usage_count': usage_count
+                }
+                for cat, tag_count, usage_count in results
+            ]
+        })
+    
+    # =========================================================================
+    # Archive endpoints (sync code based)
+    # =========================================================================
+    
+    @app.route('/api/v1/archive/generate-code', methods=['POST'])
+    def generate_sync_code():
+        """
+        Generate a new sync code for archive management.
+        
+        Returns:
+            JSON response with the generated sync code.
+        """
+        # Generate a unique sync code
+        max_attempts = 10
+        for _ in range(max_attempts):
+            code = ArchivedListing.generate_sync_code()
+            # Check if code already exists
+            existing = ArchivedListing.query.filter_by(sync_code=code).first()
+            if not existing:
+                return jsonify({
+                    'data': {'sync_code': code}
+                })
+        
+        # Fallback: return a code anyway (collision is very unlikely)
+        return jsonify({
+            'data': {'sync_code': ArchivedListing.generate_sync_code()}
+        })
+    
+    @app.route('/api/v1/archive', methods=['GET'])
+    @app.route('/api/v1/archive/', methods=['GET'])
+    def get_archived_listings():
+        """
+        Get all archived listing IDs for a sync code.
+        
+        Headers:
+            X-Sync-Code: The sync code to get archives for.
+        
+        Returns:
+            JSON response with array of archived listing IDs.
+        """
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        archived = ArchivedListing.query.filter_by(sync_code=sync_code).all()
+        
+        return jsonify({
+            'data': {
+                'sync_code': sync_code,
+                'listing_ids': [a.listing_id for a in archived],
+                'count': len(archived)
+            }
+        })
+    
+    @app.route('/api/v1/listings/<int:listing_id>/archive', methods=['POST'])
+    def archive_listing(listing_id: int):
+        """
+        Archive a listing for a sync code.
+        
+        Headers:
+            X-Sync-Code: The sync code to archive under.
+        
+        Returns:
+            JSON response confirming the archive.
+        """
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        # Check if listing exists
+        listing = Listing.query.get_or_404(listing_id)
+        
+        # Check if already archived
+        existing = ArchivedListing.query.filter_by(
+            listing_id=listing_id,
+            sync_code=sync_code
+        ).first()
+        
+        if existing:
+            return jsonify({
+                'data': existing.to_dict(),
+                'message': 'Listing was already archived'
+            })
+        
+        # Create archive entry
+        archived = ArchivedListing(
+            listing_id=listing_id,
+            sync_code=sync_code
+        )
+        db.session.add(archived)
+        db.session.commit()
+        
+        return jsonify({
+            'data': archived.to_dict(),
+            'message': 'Listing archived successfully'
+        }), 201
+    
+    @app.route('/api/v1/listings/<int:listing_id>/archive', methods=['DELETE'])
+    def unarchive_listing(listing_id: int):
+        """
+        Remove a listing from archive.
+        
+        Headers:
+            X-Sync-Code: The sync code to unarchive from.
+        
+        Returns:
+            JSON response confirming the unarchive.
+        """
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        archived = ArchivedListing.query.filter_by(
+            listing_id=listing_id,
+            sync_code=sync_code
+        ).first()
+        
+        if not archived:
+            return jsonify({'error': 'Listing not found in archive'}), 404
+        
+        db.session.delete(archived)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Listing unarchived successfully'
+        })
+    
+    @app.route('/api/v1/archive/bulk', methods=['POST'])
+    def bulk_archive_listings():
+        """
+        Archive multiple listings at once.
+        
+        Headers:
+            X-Sync-Code: The sync code to archive under.
+        
+        Request Body (JSON):
+            listing_ids (array): Array of listing IDs to archive.
+        
+        Returns:
+            JSON response with count of archived listings.
+        """
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        data = request.get_json() or {}
+        listing_ids = data.get('listing_ids', [])
+        
+        if not listing_ids or not isinstance(listing_ids, list):
+            return jsonify({'error': 'listing_ids array is required'}), 400
+        
+        archived_count = 0
+        for listing_id in listing_ids:
+            try:
+                # Check if already archived
+                existing = ArchivedListing.query.filter_by(
+                    listing_id=listing_id,
+                    sync_code=sync_code
+                ).first()
+                
+                if not existing:
+                    archived = ArchivedListing(
+                        listing_id=listing_id,
+                        sync_code=sync_code
+                    )
+                    db.session.add(archived)
+                    archived_count += 1
+            except Exception:
+                continue
+        
+        db.session.commit()
+        
+        return jsonify({
+            'data': {
+                'archived_count': archived_count,
+                'total_requested': len(listing_ids)
+            },
+            'message': f'Archived {archived_count} listings'
+        }), 201
+    
+    @app.route('/api/v1/archive/clear', methods=['DELETE'])
+    def clear_archive():
+        """
+        Clear all archived listings for a sync code.
+        
+        Headers:
+            X-Sync-Code: The sync code to clear.
+        
+        Returns:
+            JSON response with count of cleared listings.
+        """
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        count = ArchivedListing.query.filter_by(sync_code=sync_code).delete()
+        db.session.commit()
+        
+        return jsonify({
+            'data': {'cleared_count': count},
+            'message': f'Cleared {count} archived listings'
+        })
+    
+    # =========================================================================
+    # Laptop categories endpoint
+    # =========================================================================
+    
+    @app.route('/api/v1/laptop-categories', methods=['GET'])
+    @app.route('/api/v1/laptop-categories/', methods=['GET'])
+    def get_laptop_categories():
+        """
+        Get list of laptop categories with counts.
+        
+        Returns:
+            JSON response with array of categories and their listing counts.
+        """
+        from sqlalchemy import func
+        
+        results = db.session.query(
+            Listing.laptop_category,
+            func.count(Listing.id).label('count')
+        ).filter(
+            Listing.item_type == 'laptop',
+            Listing.laptop_category.isnot(None)
+        ).group_by(
+            Listing.laptop_category
+        ).order_by(
+            func.count(Listing.id).desc()
+        ).all()
+        
+        # Also get count of uncategorized laptops
+        uncategorized = Listing.query.filter(
+            Listing.item_type == 'laptop',
+            or_(Listing.laptop_category.is_(None), Listing.laptop_category == '')
+        ).count()
+        
+        return jsonify({
+            'data': [
+                {'category': cat or 'other', 'count': count}
+                for cat, count in results
+            ] + ([{'category': 'other', 'count': uncategorized}] if uncategorized > 0 else [])
         })
     
     # Scraper endpoints
@@ -825,12 +1230,38 @@ def register_routes(app: Flask):
         new_count = 0
         updated_count = 0
 
+        # Helper function to get or create tags
+        def get_or_create_tags(title: str, description: str) -> list:
+            """Extract tags from listing text and return Tag objects."""
+            extracted = extract_tags(title, description)
+            tag_objects = []
+            for category, value in extracted:
+                # Try to find existing tag
+                tag = Tag.query.filter_by(category=category, value=value).first()
+                if not tag:
+                    tag = Tag(category=category, value=value)
+                    db.session.add(tag)
+                    db.session.flush()  # Get tag ID
+                tag_objects.append(tag)
+            return tag_objects
+
         for ext_id, listing_info in listings_by_id.items():
             listing_data = listing_info['data']
             keywords_set = listing_info['keywords']
             keywords_str = ','.join(sorted(keywords_set)) if keywords_set else ''
             new_price_cents = int(listing_data['price'] * 100) if listing_data.get('price') else None
-            item_type = classify_item_type(listing_data.get('title', ''), listing_data.get('description'))
+            
+            title = listing_data.get('title', '')
+            description = listing_data.get('description', '')
+            
+            # Classify item type and laptop category
+            item_type = classify_item_type(title, description)
+            laptop_category = None
+            if item_type == 'laptop':
+                laptop_category = classify_laptop_category(title, description)
+            
+            # Extract hardware tags
+            tags = get_or_create_tags(title, description)
 
             existing = Listing.query.filter_by(external_id=ext_id).first()
             if existing:
@@ -847,6 +1278,7 @@ def register_routes(app: Flask):
                 existing.condition = listing_data['condition']
                 existing.image_url = listing_data['image_url']
                 existing.item_type = item_type
+                existing.laptop_category = laptop_category
                 existing.updated_at = datetime.utcnow()
 
                 # Merge keywords
@@ -856,14 +1288,25 @@ def register_routes(app: Flask):
                     existing.search_keywords = ','.join(sorted(merged_keywords))
                 else:
                     existing.search_keywords = keywords_str
+                
+                # Update tags (replace with new extractions)
+                existing.tags = []
+                for tag in tags:
+                    if tag not in existing.tags.all():
+                        existing.tags.append(tag)
 
                 updated_count += 1
             else:
                 listing_data['item_type'] = item_type
+                listing_data['laptop_category'] = laptop_category
                 new_listing = Listing.from_scraped_dict(listing_data)
                 new_listing.search_keywords = keywords_str
                 db.session.add(new_listing)
                 db.session.flush()  # Get the ID
+                
+                # Associate tags with new listing
+                for tag in tags:
+                    new_listing.tags.append(tag)
 
                 # Add initial price to history
                 if new_price_cents is not None:

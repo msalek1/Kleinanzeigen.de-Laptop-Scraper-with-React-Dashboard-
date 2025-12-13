@@ -7,13 +7,23 @@ interface ListingGridProps {
   listings: Listing[]
   isLoading?: boolean
   onListingClick?: (listing: Listing) => void
+  /** Set of archived listing IDs */
+  archivedIds?: Set<number>
+  /** Callback when archive status is toggled */
+  onArchiveToggle?: (listingId: number) => void
 }
 
 /**
  * Grid component displaying multiple listing cards.
  * Handles loading and empty states.
  */
-export default function ListingGrid({ listings, isLoading, onListingClick }: ListingGridProps) {
+export default function ListingGrid({
+  listings,
+  isLoading,
+  onListingClick,
+  archivedIds,
+  onArchiveToggle,
+}: ListingGridProps) {
   const container = {
     hidden: { opacity: 0 },
     show: {
@@ -33,7 +43,7 @@ export default function ListingGrid({ listings, isLoading, onListingClick }: Lis
         >
           <Loader2 className="w-10 h-10 text-primary-600" />
         </motion.div>
-        <motion.span 
+        <motion.span
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           className="mt-4 text-gray-500 dark:text-gray-400 font-medium"
@@ -43,10 +53,10 @@ export default function ListingGrid({ listings, isLoading, onListingClick }: Lis
       </div>
     )
   }
-  
+
   if (listings.length === 0) {
     return (
-      <motion.div 
+      <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         className="text-center py-16"
@@ -61,9 +71,9 @@ export default function ListingGrid({ listings, isLoading, onListingClick }: Lis
       </motion.div>
     )
   }
-  
+
   return (
-    <motion.div 
+    <motion.div
       variants={container}
       initial="hidden"
       animate="show"
@@ -75,9 +85,12 @@ export default function ListingGrid({ listings, isLoading, onListingClick }: Lis
             key={listing.id}
             listing={listing}
             onClick={() => onListingClick?.(listing)}
+            isArchived={archivedIds?.has(listing.id) ?? false}
+            onArchiveToggle={onArchiveToggle}
           />
         ))}
       </AnimatePresence>
     </motion.div>
   )
 }
+

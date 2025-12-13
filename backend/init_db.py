@@ -12,8 +12,8 @@ from sqlalchemy import text, inspect
 from sqlalchemy.exc import IntegrityError, ProgrammingError, OperationalError
 
 from app import create_app
-from classifier import classify_item_type
-from models import db, ScraperConfig, Listing, PriceHistory
+from classifier import classify_item_type, classify_laptop_category
+from models import db, ScraperConfig, Listing, PriceHistory, Tag, listing_tags, ArchivedListing
 
 
 def wait_for_db(app, max_retries=30, delay=1):
@@ -112,6 +112,43 @@ def apply_migrations(app):
                 db.session.commit()
                 print("progress_json column added successfully")
 
+            # Migration 5: Create tags table if it doesn't exist
+            if not has_table('tags'):
+                print("Creating tags table...")
+                db.metadata.create_all(db.engine, tables=[Tag.__table__], checkfirst=True)
+                db.session.commit()
+                print("tags table created successfully")
+
+            # Migration 6: Create listing_tags association table if it doesn't exist
+            if not has_table('listing_tags'):
+                print("Creating listing_tags table...")
+                db.metadata.create_all(db.engine, tables=[listing_tags], checkfirst=True)
+                db.session.commit()
+                print("listing_tags table created successfully")
+
+            # Migration 7: Create archived_listings table if it doesn't exist
+            if not has_table('archived_listings'):
+                print("Creating archived_listings table...")
+                db.metadata.create_all(db.engine, tables=[ArchivedListing.__table__], checkfirst=True)
+                db.session.commit()
+                print("archived_listings table created successfully")
+
+            # Migration 8: Add laptop_category column to listings if it doesn't exist
+            added_laptop_category = False
+            if has_table('listings') and not has_column('listings', 'laptop_category'):
+                print("Adding laptop_category column to listings table...")
+                db.session.execute(text("ALTER TABLE listings ADD COLUMN laptop_category VARCHAR(30)"))
+                db.session.commit()
+                print("laptop_category column added successfully")
+                added_laptop_category = True
+
+                # Add index for faster filtering
+                try:
+                    db.session.execute(text("CREATE INDEX IF NOT EXISTS idx_listings_laptop_category ON listings(laptop_category)"))
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
             # Data migration: backfill item_type for existing rows
             if has_table('listings') and (added_item_type or has_column('listings', 'item_type')):
                 try:
@@ -128,6 +165,24 @@ def apply_migrations(app):
                         print("item_type backfill complete")
                 except Exception as e:
                     print(f"Note: Could not backfill item_type: {e}")
+                    db.session.rollback()
+
+            # Data migration: backfill laptop_category for existing laptop listings
+            if has_table('listings') and (added_laptop_category or has_column('listings', 'laptop_category')):
+                try:
+                    inspector = inspect(db.engine)
+                    missing = Listing.query.filter(
+                        Listing.item_type == 'laptop',
+                        (Listing.laptop_category.is_(None)) | (Listing.laptop_category == '')
+                    ).limit(5000).all()
+                    if missing:
+                        print(f"Backfilling laptop_category for {len(missing)} listings...")
+                        for listing in missing:
+                            listing.laptop_category = classify_laptop_category(listing.title or '', listing.description)
+                        db.session.commit()
+                        print("laptop_category backfill complete")
+                except Exception as e:
+                    print(f"Note: Could not backfill laptop_category: {e}")
                     db.session.rollback()
             
         except Exception as e:

@@ -6,10 +6,108 @@ scraped notebook listings with normalized data.
 """
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from flask_sqlalchemy import SQLAlchemy
+import random
+import string
 
 db = SQLAlchemy()
+
+
+# Association table for many-to-many relationship between Listing and Tag
+listing_tags = db.Table(
+    'listing_tags',
+    db.Column('listing_id', db.Integer, db.ForeignKey('listings.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('tag_id', db.Integer, db.ForeignKey('tags.id', ondelete='CASCADE'), primary_key=True),
+    db.Column('created_at', db.DateTime, default=datetime.utcnow)
+)
+
+
+class Tag(db.Model):
+    """
+    Hardware specification tag for filtering listings.
+    
+    Categories include: cpu_brand, cpu_model, ram, storage, gpu, 
+    screen_size, brand, refresh_rate, os
+    
+    Attributes:
+        id: Primary key.
+        category: Tag category (e.g., 'cpu_model', 'ram', 'gpu').
+        value: Normalized tag value (e.g., 'i7-12700H', '16GB RAM').
+        display_name: Optional user-friendly display name.
+    """
+    
+    __tablename__ = 'tags'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    category = db.Column(db.String(50), nullable=False, index=True)
+    value = db.Column(db.String(100), nullable=False)
+    display_name = db.Column(db.String(100), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('category', 'value', name='uq_tag_category_value'),
+    )
+    
+    def __repr__(self) -> str:
+        return f'<Tag {self.category}:{self.value}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert tag to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'category': self.category,
+            'value': self.value,
+            'display_name': self.display_name or self.value,
+        }
+
+
+class ArchivedListing(db.Model):
+    """
+    Tracks listings archived by users (synced across devices via sync code).
+    
+    Users can generate a sync code and use it on other devices to sync
+    their archived listings.
+    
+    Attributes:
+        id: Primary key.
+        listing_id: Foreign key to the archived listing.
+        sync_code: Short 8-character alphanumeric code for cross-device sync.
+        archived_at: When the listing was archived.
+    """
+    
+    __tablename__ = 'archived_listings'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    listing_id = db.Column(db.Integer, db.ForeignKey('listings.id', ondelete='CASCADE'), nullable=False, index=True)
+    sync_code = db.Column(db.String(8), nullable=False, index=True)
+    archived_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('listing_id', 'sync_code', name='uq_archived_listing_sync'),
+    )
+    
+    def __repr__(self) -> str:
+        return f'<ArchivedListing listing={self.listing_id} sync={self.sync_code}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert archived listing to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'listing_id': self.listing_id,
+            'sync_code': self.sync_code,
+            'archived_at': self.archived_at.isoformat() if self.archived_at else None,
+        }
+    
+    @staticmethod
+    def generate_sync_code() -> str:
+        """
+        Generate a unique 8-character alphanumeric sync code.
+        Format: 4 uppercase letters + 4 digits (e.g., 'GAME2024').
+        """
+        letters = ''.join(random.choices(string.ascii_uppercase, k=4))
+        digits = ''.join(random.choices(string.digits, k=4))
+        return letters + digits
 
 
 class Listing(db.Model):
@@ -71,11 +169,18 @@ class Listing(db.Model):
     # Heuristic classification to support laptop-focused views
     item_type = db.Column(db.String(20), nullable=True, index=True)
     
+    # Laptop sub-category for more specific filtering (gaming, business, ultrabook, etc.)
+    laptop_category = db.Column(db.String(30), nullable=True, index=True)
+    
     # Debug field - not populated by default
     raw_html = db.Column(db.Text, nullable=True)
     
     # Relationship to price history
     price_history = db.relationship('PriceHistory', backref='listing', lazy='dynamic', cascade='all, delete-orphan')
+    
+    # Relationship to hardware tags (many-to-many)
+    tags = db.relationship('Tag', secondary=listing_tags, lazy='dynamic',
+                           backref=db.backref('listings', lazy='dynamic'))
     
     def __repr__(self) -> str:
         return f'<Listing {self.external_id}: {self.title[:50]}>'
@@ -114,6 +219,8 @@ class Listing(db.Model):
             'seller_type': self.seller_type,
             'search_keywords': keywords_list,
             'item_type': self.item_type,
+            'laptop_category': self.laptop_category,
+            'tags': [tag.to_dict() for tag in self.tags.all()] if self.tags else [],
         }
         
         # Include price history if requested
@@ -168,6 +275,7 @@ class Listing(db.Model):
             image_url=data.get('image_url'),
             seller_type=data.get('seller_type'),
             item_type=data.get('item_type'),
+            laptop_category=data.get('laptop_category'),
         )
 
 
