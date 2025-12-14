@@ -113,11 +113,12 @@ export interface ListingsParams {
   tags?: string
   brand?: string
   exclude_archived?: boolean
-  date_period?: 'today' | '3days' | 'week' | '2weeks' | 'month' | '3months' | 'year'
+  date_period?: 'today' | '2days' | '3days' | 'week' | '2weeks' | 'month' | '3months' | 'year'
   date_from?: string  // ISO format: YYYY-MM-DD
   date_to?: string    // ISO format: YYYY-MM-DD
   sort?: 'price' | 'posted_at' | 'scraped_at' | 'title'
   order?: 'asc' | 'desc'
+  include_stale?: boolean  // If true, include items older than 48 hours
 }
 
 export interface KeywordData {

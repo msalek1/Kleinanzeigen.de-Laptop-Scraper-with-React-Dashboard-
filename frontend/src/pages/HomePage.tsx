@@ -106,15 +106,18 @@ export default function HomePage() {
 
   // Update URL when filters change
   const handleFilterChange = useCallback((newFilters: ListingsParams) => {
+    console.log('[HomePage] handleFilterChange called with:', newFilters)
     setFilters(newFilters)
 
     const params = new URLSearchParams()
     Object.entries(newFilters).forEach(([key, value]) => {
       if (value !== undefined && value !== '') {
         if (key === 'item_type' && value === 'laptop') return
+        console.log('[HomePage] Adding to URL params:', key, '=', value)
         params.set(key, String(value))
       }
     })
+    console.log('[HomePage] Final URL params:', params.toString())
     setSearchParams(params)
   }, [setSearchParams])
 
@@ -138,13 +141,17 @@ export default function HomePage() {
 
   // Handle date period change
   const handleDatePeriodChange = useCallback((period: ListingsParams['date_period']) => {
-    handleFilterChange({
+    console.log('[HomePage] handleDatePeriodChange called with:', period)
+    console.log('[HomePage] current filters:', filters)
+    const newFilters = {
       ...filters,
       date_period: period,
       date_from: undefined,
       date_to: undefined,
       page: 1
-    })
+    }
+    console.log('[HomePage] new filters will be:', newFilters)
+    handleFilterChange(newFilters)
   }, [filters, handleFilterChange])
 
   // Handle custom date range change

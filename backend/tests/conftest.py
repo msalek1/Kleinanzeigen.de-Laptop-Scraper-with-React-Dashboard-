@@ -3,6 +3,7 @@ Pytest configuration and fixtures for backend tests.
 """
 
 import pytest
+from datetime import datetime, timedelta
 from app import create_app
 from models import db, Listing, ScraperJob
 from config import TestingConfig
@@ -40,6 +41,7 @@ def sample_listing(app):
             description='Great laptop in excellent condition',
             condition='Gebraucht',
             image_url='https://example.com/image.jpg',
+            posted_at=datetime.utcnow() - timedelta(hours=1),  # Recent post for 48h filter
         )
         db.session.add(listing)
         db.session.commit()
@@ -64,6 +66,7 @@ def sample_listings(app):
                 location_city=['Berlin', 'Munich', 'Hamburg'][i % 3],
                 description=f'Description for laptop {i}',
                 condition='Neu' if i % 2 == 0 else 'Gebraucht',
+                posted_at=datetime.utcnow() - timedelta(hours=i),  # Recent posts for 48h filter
             )
             listings.append(listing)
             db.session.add(listing)

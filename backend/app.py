@@ -238,6 +238,7 @@ def register_routes(app: Flask):
             now = datetime.utcnow()
             period_map = {
                 'today': timedelta(days=1),
+                '2days': timedelta(days=2),
                 '3days': timedelta(days=3),
                 'week': timedelta(days=7),
                 '2weeks': timedelta(days=14),
@@ -268,8 +269,14 @@ def register_routes(app: Flask):
             except ValueError:
                 pass  # Invalid date format, ignore
         
+        # Fresh listings filter (default: show only last 48 hours if no date filter specified)
+        include_stale = request.args.get('include_stale', '').strip().lower()
+        if include_stale != 'true' and not date_period and not date_from and not date_to:
+            cutoff = datetime.utcnow() - timedelta(days=2)
+            query = query.filter(Listing.posted_at >= cutoff)
+        
         # Sorting
-        sort_field = request.args.get('sort', 'scraped_at')
+        sort_field = request.args.get('sort', 'posted_at')
         sort_order = request.args.get('order', 'desc')
         
         sort_column = {
@@ -277,7 +284,7 @@ def register_routes(app: Flask):
             'posted_at': Listing.posted_at,
             'scraped_at': Listing.scraped_at,
             'title': Listing.title,
-        }.get(sort_field, Listing.scraped_at)
+        }.get(sort_field, Listing.posted_at)
         
         if sort_order == 'asc':
             query = query.order_by(sort_column.asc())

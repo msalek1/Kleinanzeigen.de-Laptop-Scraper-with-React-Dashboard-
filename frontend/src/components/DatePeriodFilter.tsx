@@ -12,6 +12,7 @@ import { ListingsParams } from '../services/api'
 // Period options with labels
 const PERIOD_OPTIONS = [
     { value: 'today', label: 'Today', short: '24h' },
+    { value: '2days', label: 'Last 2 Days', short: '48h' },
     { value: '3days', label: 'Last 3 Days', short: '3d' },
     { value: 'week', label: 'Last Week', short: '7d' },
     { value: '2weeks', label: 'Last 2 Weeks', short: '14d' },
@@ -54,10 +55,14 @@ export default function DatePeriodFilter({
     const [customTo, setCustomTo] = useState(dateTo || '')
 
     const handlePeriodClick = (period: PeriodValue) => {
+        console.log('[DatePeriodFilter] handlePeriodClick called with:', period)
+        console.log('[DatePeriodFilter] selectedPeriod is:', selectedPeriod)
         if (selectedPeriod === period) {
             // Toggle off if clicking same period
+            console.log('[DatePeriodFilter] Toggling off - calling onPeriodChange(undefined)')
             onPeriodChange(undefined)
         } else {
+            console.log('[DatePeriodFilter] Setting new period - calling onPeriodChange:', period)
             onPeriodChange(period)
             // Clear custom dates when selecting a preset
             if (onDateRangeChange) {
@@ -107,8 +112,8 @@ export default function DatePeriodFilter({
                         key={value}
                         onClick={() => handlePeriodClick(value)}
                         className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${selectedPeriod === value
-                                ? 'bg-primary-600 text-white'
-                                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
+                            ? 'bg-primary-600 text-white'
+                            : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
                             }`}
                     >
                         {short}
@@ -133,8 +138,8 @@ export default function DatePeriodFilter({
             <button
                 onClick={() => setShowDropdown(!showDropdown)}
                 className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border transition-all ${hasActiveFilter
-                        ? 'bg-primary-50 dark:bg-primary-900/20 border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300'
-                        : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
+                    ? 'bg-primary-50 dark:bg-primary-900/20 border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300'
+                    : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'
                     }`}
             >
                 <Calendar className="w-4 h-4" />
@@ -161,8 +166,8 @@ export default function DatePeriodFilter({
                                     key={value}
                                     onClick={() => handlePeriodClick(value)}
                                     className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-all ${selectedPeriod === value
-                                            ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-medium'
-                                            : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                                        ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 font-medium'
+                                        : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
                                         }`}
                                 >
                                     {label}

@@ -20,20 +20,20 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
   const [minPrice, setMinPrice] = useState<string>(filters.min_price?.toString() || '')
   const [maxPrice, setMaxPrice] = useState<string>(filters.max_price?.toString() || '')
   const [location, setLocation] = useState(filters.location || '')
-  
+
   // Debounce search inputs for better performance
   const debouncedSearch = useDebounce(searchText, 400)
   const debouncedMinPrice = useDebounce(minPrice, 500)
   const debouncedMaxPrice = useDebounce(maxPrice, 500)
   const debouncedLocation = useDebounce(location, 500)
-  
+
   // Apply debounced search
   useEffect(() => {
     if (debouncedSearch !== (filters.q || '')) {
       onFilterChange({ ...filters, q: debouncedSearch || undefined, page: 1 })
     }
   }, [debouncedSearch, filters, onFilterChange])
-  
+
   // Apply debounced price filters
   useEffect(() => {
     const newMinPrice = debouncedMinPrice ? Number(debouncedMinPrice) : undefined
@@ -41,27 +41,27 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
       onFilterChange({ ...filters, min_price: newMinPrice, page: 1 })
     }
   }, [debouncedMinPrice, filters, onFilterChange])
-  
+
   useEffect(() => {
     const newMaxPrice = debouncedMaxPrice ? Number(debouncedMaxPrice) : undefined
     if (newMaxPrice !== filters.max_price) {
       onFilterChange({ ...filters, max_price: newMaxPrice, page: 1 })
     }
   }, [debouncedMaxPrice, filters, onFilterChange])
-  
+
   // Apply debounced location filter
   useEffect(() => {
     if (debouncedLocation !== (filters.location || '')) {
       onFilterChange({ ...filters, location: debouncedLocation || undefined, page: 1 })
     }
   }, [debouncedLocation, filters, onFilterChange])
-  
+
   const handleSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault()
     // Immediate search on form submit
     onFilterChange({ ...filters, q: searchText || undefined, page: 1 })
   }, [filters, searchText, onFilterChange])
-  
+
   const handleFilterChange = useCallback((key: keyof ListingsParams, value: string | number | undefined) => {
     const newFilters = { ...filters, [key]: value, page: 1 }
     if (value === '' || value === undefined) {
@@ -69,7 +69,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
     }
     onFilterChange(newFilters)
   }, [filters, onFilterChange])
-  
+
   const clearFilters = useCallback(() => {
     setSearchText('')
     setMinPrice('')
@@ -77,7 +77,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
     setLocation('')
     onFilterChange({ page: 1, per_page: filters.per_page, item_type: filters.item_type })
   }, [filters.item_type, filters.per_page, onFilterChange])
-  
+
   const hasActiveFilters = (
     filters.q ||
     filters.min_price ||
@@ -86,7 +86,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
     filters.condition ||
     (filters.item_type && filters.item_type !== 'laptop')
   )
-  
+
   return (
     <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 mb-6 transition-all duration-300 hover:shadow-md">
       {/* Search bar */}
@@ -114,16 +114,15 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
           whileTap={{ scale: 0.95 }}
           type="button"
           onClick={() => setShowAdvanced(!showAdvanced)}
-          className={`px-3 py-2 border rounded-lg transition-colors ${
-            showAdvanced || hasActiveFilters
+          className={`px-3 py-2 border rounded-lg transition-colors ${showAdvanced || hasActiveFilters
               ? 'border-primary-500 text-primary-600 bg-primary-50 dark:bg-primary-900/20'
               : 'border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
-          }`}
+            }`}
         >
           <SlidersHorizontal className="w-5 h-5" />
         </motion.button>
       </form>
-      
+
       {/* Advanced filters */}
       <AnimatePresence>
         {showAdvanced && (
@@ -163,7 +162,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
                   />
                 </div>
-                
+
                 {/* Location */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
@@ -177,7 +176,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
                   />
                 </div>
-                
+
                 {/* Condition */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
@@ -211,7 +210,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                   </select>
                 </div>
               </div>
-              
+
               {/* Sort options */}
               <div className="mt-5 flex flex-wrap gap-4 items-center justify-between">
                 <div className="flex items-center gap-3">
@@ -237,7 +236,7 @@ export default function FilterBar({ filters, onFilterChange }: FilterBarProps) {
                     <option value="asc">Ascending</option>
                   </select>
                 </div>
-                
+
                 {hasActiveFilters && (
                   <motion.button
                     initial={{ opacity: 0, scale: 0.9 }}
