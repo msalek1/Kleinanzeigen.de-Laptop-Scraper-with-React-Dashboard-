@@ -1,10 +1,10 @@
-import { Listing } from '../services/api'
+import { Listing, ListingWithScore } from '../services/api'
 import ListingCard from './ListingCard'
 import { Loader2 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 interface ListingGridProps {
-  listings: Listing[]
+  listings: (Listing | ListingWithScore)[]
   isLoading?: boolean
   onListingClick?: (listing: Listing) => void
   /** Set of archived listing IDs */
@@ -80,15 +80,21 @@ export default function ListingGrid({
       className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6"
     >
       <AnimatePresence mode='popLayout'>
-        {listings.map((listing) => (
-          <ListingCard
-            key={listing.id}
-            listing={listing}
-            onClick={() => onListingClick?.(listing)}
-            isArchived={archivedIds?.has(listing.id) ?? false}
-            onArchiveToggle={onArchiveToggle}
-          />
-        ))}
+        {listings.map((listing) => {
+          // Check if listing has match_score (ListingWithScore type)
+          const matchScore = 'match_score' in listing ? listing.match_score : undefined
+
+          return (
+            <ListingCard
+              key={listing.id}
+              listing={listing}
+              onClick={() => onListingClick?.(listing)}
+              isArchived={archivedIds?.has(listing.id) ?? false}
+              onArchiveToggle={onArchiveToggle}
+              matchScore={matchScore}
+            />
+          )
+        })}
       </AnimatePresence>
     </motion.div>
   )

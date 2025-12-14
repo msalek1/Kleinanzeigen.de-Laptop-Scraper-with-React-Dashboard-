@@ -1898,15 +1898,10 @@ def register_routes(app: Flask):
                 'message': 'No preferences set. Configure preferences first.'
             })
         
-        # Get learned data
-        learned_keywords = {
-            lp.keyword: lp.learned_weight 
-            for lp in LearnedPreference.query.filter_by(sync_code=sync_code).all()
-        }
-        brand_affinities = {
-            ba.brand: ba.affinity_score 
-            for ba in BrandAffinity.query.filter_by(sync_code=sync_code).all()
-        }
+        # Get effective learned weights with time decay and confidence
+        from ml_learning import get_effective_learned_weights, get_effective_brand_affinities
+        learned_keywords = get_effective_learned_weights(sync_code, LearnedPreference, apply_decay=True)
+        brand_affinities = get_effective_brand_affinities(sync_code, BrandAffinity, apply_decay=True)
         
         # Check for cached analyses
         cached = ItemAnalysis.query.filter_by(
@@ -1990,15 +1985,10 @@ def register_routes(app: Flask):
                 'message': 'No preferences set. Configure preferences first.'
             })
         
-        # Get learned data
-        learned_keywords = {
-            lp.keyword: lp.learned_weight 
-            for lp in LearnedPreference.query.filter_by(sync_code=sync_code).all()
-        }
-        brand_affinities = {
-            ba.brand: ba.affinity_score 
-            for ba in BrandAffinity.query.filter_by(sync_code=sync_code).all()
-        }
+        # Get effective learned weights with time decay and confidence
+        from ml_learning import get_effective_learned_weights, get_effective_brand_affinities
+        learned_keywords = get_effective_learned_weights(sync_code, LearnedPreference, apply_decay=True)
+        brand_affinities = get_effective_brand_affinities(sync_code, BrandAffinity, apply_decay=True)
         
         # Check for cached analyses
         cached = ItemAnalysis.query.filter_by(
@@ -2097,63 +2087,26 @@ def register_routes(app: Flask):
         )
         db.session.add(interaction)
         
-        # Update learned preferences based on action
-        weight_adjustment = {
-            'view': 0.01,
-            'click': 0.05,
-            'save': 0.15,
-            'dismiss': -0.10,
-            'contact': 0.25,
-        }.get(action_type, 0)
-        
-        if weight_adjustment != 0:
-            # Extract keywords from listing and adjust learned weights
-            from tag_extractor import extract_tags
-            tags = extract_tags(listing.title, listing.description)
-            
-            for category, value in tags:
-                # Update learned preference for this keyword
-                learned = LearnedPreference.query.filter_by(
-                    sync_code=sync_code, keyword=value
-                ).first()
-                if not learned:
-                    learned = LearnedPreference(
-                        sync_code=sync_code, 
-                        keyword=value,
-                        learned_weight=0.0,
-                        interaction_count=0
-                    )
-                    db.session.add(learned)
-                
-                # Handle None values (shouldn't happen but safety check)
-                current_weight = learned.learned_weight or 0.0
-                learned.learned_weight = current_weight + weight_adjustment
-                learned.interaction_count = (learned.interaction_count or 0) + 1
-                
-                # Update brand affinity if this is a brand tag
-                if category == 'brand':
-                    affinity = BrandAffinity.query.filter_by(
-                        sync_code=sync_code, brand=value
-                    ).first()
-                    if not affinity:
-                        affinity = BrandAffinity(
-                            sync_code=sync_code, 
-                            brand=value,
-                            affinity_score=0.0,
-                            interaction_count=0
-                        )
-                        db.session.add(affinity)
-                    
-                    # Handle None and clamp affinity between -1 and 1
-                    current_affinity = affinity.affinity_score or 0.0
-                    affinity.affinity_score = max(-1, min(1, current_affinity + weight_adjustment))
-                    affinity.interaction_count = (affinity.interaction_count or 0) + 1
+        # Use enhanced ML learning
+        from ml_learning import learn_from_interaction
+        learning_result = learn_from_interaction(
+            interaction=interaction,
+            listing=listing,
+            db_session=db.session,
+            LearnedPreferenceModel=LearnedPreference,
+            BrandAffinityModel=BrandAffinity,
+        )
         
         db.session.commit()
         
         return jsonify({
             'data': interaction.to_dict(),
-            'message': 'Interaction logged successfully'
+            'learning': {
+                'keywords_updated': len(learning_result.get('updated_keywords', [])),
+                'brands_updated': len(learning_result.get('updated_brands', [])),
+                'base_weight': learning_result.get('base_weight', 0),
+            },
+            'message': 'Interaction logged and learning applied'
         }), 201
     
     @app.route('/api/v1/learned-profile', methods=['GET'])
@@ -2164,15 +2117,28 @@ def register_routes(app: Flask):
         Headers:
             X-Sync-Code: User's sync code.
         
+        Query Parameters:
+            include_stats (bool): Include interaction statistics.
+        
         Returns:
-            JSON response with learned keyword weights and brand affinities.
+            JSON response with learned keyword weights, brand affinities,
+            and optionally interaction statistics.
         """
-        from models import LearnedPreference, BrandAffinity
+        from models import LearnedPreference, BrandAffinity, UserInteraction
+        from ml_learning import (
+            get_effective_learned_weights,
+            get_effective_brand_affinities,
+            calculate_confidence,
+            analyze_interaction_patterns,
+        )
         
         sync_code = request.headers.get('X-Sync-Code', '').strip()
         if not sync_code:
             return jsonify({'error': 'X-Sync-Code header is required'}), 400
         
+        include_stats = request.args.get('include_stats', 'false').lower() == 'true'
+        
+        # Get raw learned preferences
         learned_prefs = LearnedPreference.query.filter_by(sync_code=sync_code).order_by(
             LearnedPreference.learned_weight.desc()
         ).limit(50).all()
@@ -2181,26 +2147,46 @@ def register_routes(app: Flask):
             BrandAffinity.affinity_score.desc()
         ).all()
         
-        return jsonify({
-            'data': {
-                'learned_keywords': [
-                    {
-                        'keyword': lp.keyword,
-                        'weight': round(lp.learned_weight, 3),
-                        'interactions': lp.interaction_count
-                    }
-                    for lp in learned_prefs
-                ],
-                'brand_affinities': [
-                    {
-                        'brand': ba.brand,
-                        'affinity': round(ba.affinity_score, 3),
-                        'interactions': ba.interaction_count
-                    }
-                    for ba in brand_affs
-                ]
-            }
-        })
+        # Get effective weights with time decay and confidence
+        effective_keywords = get_effective_learned_weights(
+            sync_code, LearnedPreference, apply_decay=True
+        )
+        effective_brands = get_effective_brand_affinities(
+            sync_code, BrandAffinity, apply_decay=True
+        )
+        
+        response_data = {
+            'learned_keywords': [
+                {
+                    'keyword': lp.keyword,
+                    'raw_weight': round(lp.learned_weight or 0, 3),
+                    'effective_weight': round(effective_keywords.get(lp.keyword, 0), 3),
+                    'confidence': round(calculate_confidence(lp.interaction_count or 0), 2),
+                    'interactions': lp.interaction_count or 0,
+                    'last_updated': lp.last_updated.isoformat() if lp.last_updated else None,
+                }
+                for lp in learned_prefs
+            ],
+            'brand_affinities': [
+                {
+                    'brand': ba.brand,
+                    'raw_affinity': round(ba.affinity_score or 0, 3),
+                    'effective_affinity': round(effective_brands.get(ba.brand, 0), 3),
+                    'confidence': round(calculate_confidence(ba.interaction_count or 0), 2),
+                    'interactions': ba.interaction_count or 0,
+                    'last_updated': ba.last_updated.isoformat() if ba.last_updated else None,
+                }
+                for ba in brand_affs
+            ]
+        }
+        
+        # Add statistics if requested
+        if include_stats:
+            response_data['statistics'] = analyze_interaction_patterns(
+                sync_code, UserInteraction, days=30
+            )
+        
+        return jsonify({'data': response_data})
     
     # Error handlers
     @app.errorhandler(400)

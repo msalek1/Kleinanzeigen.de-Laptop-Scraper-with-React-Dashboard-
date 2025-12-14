@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
-import { ExternalLink, MapPin, Tag, Calendar, Hash, Heart, TrendingDown, TrendingUp, Archive, ArchiveX, Gamepad2, Briefcase, Laptop, Wrench, RefreshCw, Cpu, HardDrive, Palette } from 'lucide-react'
-import { Listing } from '../services/api'
+import { ExternalLink, MapPin, Tag, Calendar, Hash, Heart, TrendingDown, TrendingUp, Archive, ArchiveX, Gamepad2, Briefcase, Laptop, Wrench, RefreshCw, Cpu, HardDrive, Palette, Flame, ThumbsUp, Percent } from 'lucide-react'
+import { Listing, MatchScore } from '../services/api'
 import { motion } from 'framer-motion'
 import { useFavorites } from '../hooks/useFavorites'
 import OptimizedImage from './OptimizedImage'
@@ -12,6 +12,8 @@ interface ListingCardProps {
   isArchived?: boolean
   /** Callback when archive status is toggled */
   onArchiveToggle?: (listingId: number) => void
+  /** Match score from recommendation engine */
+  matchScore?: MatchScore
 }
 
 // Category badge config
@@ -35,8 +37,37 @@ const TAG_ICONS: Record<string, React.ReactNode> = {
  * Card component displaying a single notebook listing.
  * Shows image, title, price, location, and key details.
  */
-export default function ListingCard({ listing, onClick, isArchived = false, onArchiveToggle }: ListingCardProps) {
+export default function ListingCard({ listing, onClick, isArchived = false, onArchiveToggle, matchScore }: ListingCardProps) {
   const { isFavorite, toggleFavorite } = useFavorites()
+
+
+  // Get match score color and icon based on classification
+  const getMatchScoreStyle = () => {
+    if (!matchScore) return null
+    if (matchScore.classification === 'must_see') {
+      return {
+        bg: 'bg-gradient-to-r from-orange-500 to-red-500',
+        icon: <Flame className="w-3.5 h-3.5" />,
+        text: 'text-white',
+        label: 'Must See',
+      }
+    } else if (matchScore.classification === 'recommended') {
+      return {
+        bg: 'bg-gradient-to-r from-blue-500 to-indigo-500',
+        icon: <ThumbsUp className="w-3.5 h-3.5" />,
+        text: 'text-white',
+        label: 'Recommended',
+      }
+    }
+    return {
+      bg: 'bg-gray-500',
+      icon: <Percent className="w-3.5 h-3.5" />,
+      text: 'text-white',
+      label: 'Match',
+    }
+  }
+
+  const matchStyle = getMatchScoreStyle()
 
   const formatPrice = (price: number | null, negotiable: boolean) => {
     if (price === null) {
@@ -141,6 +172,21 @@ export default function ListingCard({ listing, onClick, isArchived = false, onAr
           </button>
         )}
       </div>
+
+      {/* Match Score Badge - shown when available */}
+      {matchStyle && matchScore && (
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          className={`absolute bottom-2 left-2 z-10 ${matchStyle.bg} ${matchStyle.text} px-2.5 py-1.5 rounded-lg shadow-lg flex items-center gap-1.5 text-xs font-bold`}
+        >
+          {matchStyle.icon}
+          <span>{Math.round(matchScore.total_score)}%</span>
+          <span className="opacity-75 font-medium hidden sm:inline">
+            {matchStyle.label}
+          </span>
+        </motion.div>
+      )}
 
       {/* Image */}
       <div className="aspect-video bg-gray-100 dark:bg-gray-700 relative overflow-hidden">
