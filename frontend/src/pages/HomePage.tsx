@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { RefreshCw, Loader2, AlertCircle, X, Sparkles, Archive, Eye, EyeOff, Copy, Check } from 'lucide-react'
+import { RefreshCw, Loader2, AlertCircle, X, Sparkles, Archive, Eye, EyeOff, Copy, Check, Settings } from 'lucide-react'
 import { useListings, useKeywords } from '../hooks/useApi'
-import { ListingsParams, Listing } from '../services/api'
+import { ListingsParams, Listing, recommendationApi, ListingWithScore } from '../services/api'
 import FilterBar from '../components/FilterBar'
 import ListingGrid from '../components/ListingGrid'
 import Pagination from '../components/Pagination'
@@ -12,6 +12,8 @@ import ScraperProgressPanel from '../components/ScraperProgressPanel'
 import CategoryTabs from '../components/CategoryTabs'
 import QuickFilterChips from '../components/QuickFilterChips'
 import DatePeriodFilter from '../components/DatePeriodFilter'
+import RecommendationTabs, { RecommendationView } from '../components/RecommendationTabs'
+import PreferencesPanel from '../components/PreferencesPanel'
 import { useScraperWithProgress } from '../hooks/useScraperSSE'
 import { useArchive } from '../hooks/useArchive'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -26,6 +28,14 @@ export default function HomePage() {
   const [hideArchived, setHideArchived] = useState(false)
   const [showSyncCode, setShowSyncCode] = useState(false)
   const [copiedCode, setCopiedCode] = useState(false)
+
+  // Recommendation engine state
+  const [recommendationView, setRecommendationView] = useState<RecommendationView>('all')
+  const [showPreferences, setShowPreferences] = useState(false)
+  const [hasPreferences, setHasPreferences] = useState(false)
+  const [mustSeeItems, setMustSeeItems] = useState<ListingWithScore[]>([])
+  const [recommendedItems, setRecommendedItems] = useState<ListingWithScore[]>([])
+  const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(false)
 
   const {
     startScraper,
@@ -219,6 +229,63 @@ export default function HomePage() {
 
   const showStats = searchParams.get('view') === 'stats'
 
+  // Fetch recommendations when view changes
+  useEffect(() => {
+    const fetchRecommendations = async () => {
+      if (recommendationView === 'all') return
+
+      setIsLoadingRecommendations(true)
+      try {
+        if (recommendationView === 'must_see') {
+          const { data } = await recommendationApi.getMustSee(20)
+          setMustSeeItems(data)
+        } else if (recommendationView === 'recommended') {
+          const { data } = await recommendationApi.getRecommended(20)
+          setRecommendedItems(data)
+        }
+      } catch (err) {
+        console.error('Failed to fetch recommendations:', err)
+      } finally {
+        setIsLoadingRecommendations(false)
+      }
+    }
+
+    fetchRecommendations()
+  }, [recommendationView])
+
+  // Check if user has preferences set
+  useEffect(() => {
+    const checkPreferences = async () => {
+      try {
+        const { data } = await recommendationApi.getPreferences()
+        const hasAnyPreference =
+          (data.keywords && data.keywords.length > 0) ||
+          (data.brands && data.brands.length > 0) ||
+          data.min_price !== null ||
+          data.max_price !== null
+        setHasPreferences(hasAnyPreference)
+      } catch (err) {
+        console.error('Failed to check preferences:', err)
+      }
+    }
+    checkPreferences()
+  }, [])
+
+  // Handle view change
+  const handleViewChange = useCallback((view: RecommendationView) => {
+    setRecommendationView(view)
+  }, [])
+
+  // Get display listings based on view
+  const displayListings = useMemo(() => {
+    if (recommendationView === 'must_see') {
+      return mustSeeItems
+    } else if (recommendationView === 'recommended') {
+      return recommendedItems
+    }
+    return data?.data || []
+  }, [recommendationView, mustSeeItems, recommendedItems, data?.data])
+
   return (
     <div className="max-w-[1600px] mx-auto">
       {/* Hero Section */}
@@ -375,11 +442,41 @@ export default function HomePage() {
       {/* Main Content Area */}
       <div className="space-y-6">
 
-        {/* Category Tabs */}
-        <CategoryTabs
-          selectedCategory={filters.laptop_category}
-          onCategoryChange={handleCategoryChange}
-        />
+        {/* AI Recommendations Section */}
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <RecommendationTabs
+            selectedView={recommendationView}
+            onViewChange={handleViewChange}
+            hasPreferences={hasPreferences}
+            mustSeeCount={mustSeeItems.length}
+            recommendedCount={recommendedItems.length}
+          />
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => setShowPreferences(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg shadow-md hover:shadow-lg transition-all text-sm font-medium"
+          >
+            <Settings className="w-4 h-4" />
+            Preferences
+          </motion.button>
+        </div>
+
+        {/* Loading indicator for recommendations */}
+        {isLoadingRecommendations && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+            <span className="ml-2 text-gray-600 dark:text-gray-400">Loading recommendations...</span>
+          </div>
+        )}
+
+        {/* Category Tabs (only show in "All" view) */}
+        {recommendationView === 'all' && (
+          <CategoryTabs
+            selectedCategory={filters.laptop_category}
+            onCategoryChange={handleCategoryChange}
+          />
+        )}
 
         {/* Filter Bar */}
         <FilterBar filters={filters} onFilterChange={handleFilterChange} />
@@ -456,15 +553,15 @@ export default function HomePage() {
         {!error && (
           <>
             <ListingGrid
-              listings={data?.data || []}
-              isLoading={isLoading}
+              listings={displayListings}
+              isLoading={isLoading || isLoadingRecommendations}
               onListingClick={setSelectedListing}
               archivedIds={archivedIds}
               onArchiveToggle={toggleArchive}
             />
 
-            {/* Pagination */}
-            {data?.pagination && (
+            {/* Pagination (only in All view) */}
+            {recommendationView === 'all' && data?.pagination && (
               <Pagination
                 pagination={data.pagination}
                 onPageChange={handlePageChange}
@@ -479,6 +576,25 @@ export default function HomePage() {
         listing={selectedListing}
         isOpen={!!selectedListing}
         onClose={() => setSelectedListing(null)}
+      />
+
+      {/* Preferences panel modal */}
+      <PreferencesPanel
+        isOpen={showPreferences}
+        onClose={() => setShowPreferences(false)}
+        onSave={(prefs) => {
+          setHasPreferences(
+            (prefs.keywords?.length > 0) ||
+            (prefs.brands?.length > 0) ||
+            prefs.min_price !== null ||
+            prefs.max_price !== null
+          )
+          // Refresh recommendations with new preferences
+          if (recommendationView !== 'all') {
+            setRecommendationView('all')
+            setTimeout(() => setRecommendationView(recommendationView), 100)
+          }
+        }}
       />
     </div>
   )

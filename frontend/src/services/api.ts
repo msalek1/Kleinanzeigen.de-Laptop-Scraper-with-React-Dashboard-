@@ -550,5 +550,162 @@ export const adminApi = {
   },
 }
 
+
+// =============================================================================
+// Recommendation Engine Types and API
+// =============================================================================
+
+export interface UserPreferences {
+  sync_code: string
+  keywords: string[]
+  min_price: number | null
+  max_price: number | null
+  brands: string[]
+  laptop_categories: string[]
+  weights: {
+    price: number
+    specs: number
+    brand: number
+  }
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface UserPreferencesInput {
+  keywords?: string[]
+  min_price?: number | null
+  max_price?: number | null
+  brands?: string[]
+  laptop_categories?: string[]
+  weights?: {
+    price?: number
+    specs?: number
+    brand?: number
+  }
+}
+
+export interface MatchScore {
+  listing_id?: number
+  keyword_score: number
+  price_score: number
+  brand_score: number
+  learned_bonus: number
+  total_score: number
+  classification: 'must_see' | 'recommended' | 'browse'
+  analyzed_at?: string
+}
+
+export interface ListingWithScore extends Listing {
+  match_score?: MatchScore
+}
+
+export interface LearnedKeyword {
+  keyword: string
+  weight: number
+  interactions: number
+}
+
+export interface BrandAffinity {
+  brand: string
+  affinity: number
+  interactions: number
+}
+
+export interface LearnedProfile {
+  learned_keywords: LearnedKeyword[]
+  brand_affinities: BrandAffinity[]
+}
+
+export interface InteractionInput {
+  listing_id: number
+  action_type: 'view' | 'click' | 'save' | 'dismiss' | 'contact'
+  duration_seconds?: number
+}
+
+/**
+ * Get or create sync code for recommendation engine
+ */
+const getOrCreateSyncCode = (): string => {
+  let syncCode = getSyncCode()
+  if (!syncCode) {
+    // Generate a random 8-character sync code
+    syncCode = Math.random().toString(36).substring(2, 10).toUpperCase()
+    setSyncCode(syncCode)
+  }
+  return syncCode
+}
+
+/**
+ * Recommendation engine API
+ */
+export const recommendationApi = {
+  /**
+   * Get user preferences
+   */
+  getPreferences: async (): Promise<{ data: UserPreferences }> => {
+    const response = await apiClient.get<{ data: UserPreferences }>('/preferences', {
+      headers: { 'X-Sync-Code': getOrCreateSyncCode() }
+    })
+    return response.data
+  },
+
+  /**
+   * Save user preferences
+   */
+  savePreferences: async (prefs: UserPreferencesInput): Promise<{ data: UserPreferences; message: string }> => {
+    const response = await apiClient.post<{ data: UserPreferences; message: string }>('/preferences', prefs, {
+      headers: { 'X-Sync-Code': getOrCreateSyncCode() }
+    })
+    return response.data
+  },
+
+  /**
+   * Get must-see items (score >= 75%)
+   */
+  getMustSee: async (limit: number = 20): Promise<{ data: ListingWithScore[] }> => {
+    const response = await apiClient.get<{ data: ListingWithScore[] }>('/items/must-see', {
+      params: { limit },
+      headers: { 'X-Sync-Code': getOrCreateSyncCode() }
+    })
+    return response.data
+  },
+
+  /**
+   * Get recommended items (score 50-74%)
+   */
+  getRecommended: async (limit: number = 20): Promise<{ data: ListingWithScore[] }> => {
+    const response = await apiClient.get<{ data: ListingWithScore[] }>('/items/recommended', {
+      params: { limit },
+      headers: { 'X-Sync-Code': getOrCreateSyncCode() }
+    })
+    return response.data
+  },
+
+  /**
+   * Log a user interaction (triggers ML learning)
+   */
+  logInteraction: async (interaction: InteractionInput): Promise<{ data: object; message: string }> => {
+    const response = await apiClient.post<{ data: object; message: string }>('/interactions', interaction, {
+      headers: { 'X-Sync-Code': getOrCreateSyncCode() }
+    })
+    return response.data
+  },
+
+  /**
+   * Get learned profile (ML-adjusted weights)
+   */
+  getLearnedProfile: async (): Promise<{ data: LearnedProfile }> => {
+    const response = await apiClient.get<{ data: LearnedProfile }>('/learned-profile', {
+      headers: { 'X-Sync-Code': getOrCreateSyncCode() }
+    })
+    return response.data
+  },
+
+  /**
+   * Get the current sync code
+   */
+  getSyncCode: getOrCreateSyncCode,
+}
+
 export default apiClient
 

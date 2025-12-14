@@ -1749,6 +1749,459 @@ def register_routes(app: Flask):
         ]
         return jsonify({'data': cities})
     
+    # =========================================================================
+    # AI Recommendation Engine Endpoints
+    # =========================================================================
+    
+    @app.route('/api/v1/preferences', methods=['GET'])
+    def get_preferences():
+        """
+        Get user preferences for recommendations.
+        
+        Headers:
+            X-Sync-Code: User's sync code.
+        
+        Returns:
+            JSON response with user preferences or empty defaults.
+        """
+        from models import UserPreferences
+        
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        prefs = UserPreferences.query.filter_by(sync_code=sync_code).first()
+        if prefs:
+            return jsonify({'data': prefs.to_dict()})
+        
+        # Return defaults for new users
+        return jsonify({
+            'data': {
+                'sync_code': sync_code,
+                'keywords': [],
+                'min_price': None,
+                'max_price': None,
+                'brands': [],
+                'laptop_categories': [],
+                'weights': {'price': 0.3, 'specs': 0.4, 'brand': 0.3},
+                'created_at': None,
+                'updated_at': None,
+            }
+        })
+    
+    @app.route('/api/v1/preferences', methods=['POST', 'PUT'])
+    def save_preferences():
+        """
+        Save user preferences for recommendations.
+        
+        Headers:
+            X-Sync-Code: User's sync code.
+        
+        Request Body (JSON):
+            keywords (array): Keywords to prioritize.
+            min_price (float): Minimum price in EUR.
+            max_price (float): Maximum price in EUR.
+            brands (array): Preferred brands.
+            laptop_categories (array): Preferred categories.
+            weights (object): {price, specs, brand} weights (0-1).
+        
+        Returns:
+            JSON response with saved preferences.
+        """
+        from models import UserPreferences
+        
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        data = request.get_json() or {}
+        
+        # Get or create preferences
+        prefs = UserPreferences.query.filter_by(sync_code=sync_code).first()
+        if not prefs:
+            prefs = UserPreferences(sync_code=sync_code)
+            db.session.add(prefs)
+        
+        # Update fields
+        if 'keywords' in data:
+            keywords = data['keywords']
+            if isinstance(keywords, list):
+                prefs.keywords = ','.join(keywords)
+            else:
+                prefs.keywords = str(keywords)
+        
+        if 'min_price' in data:
+            prefs.min_price = int(data['min_price'] * 100) if data['min_price'] else None
+        
+        if 'max_price' in data:
+            prefs.max_price = int(data['max_price'] * 100) if data['max_price'] else None
+        
+        if 'brands' in data:
+            brands = data['brands']
+            if isinstance(brands, list):
+                prefs.brands = ','.join(brands)
+            else:
+                prefs.brands = str(brands)
+        
+        if 'laptop_categories' in data:
+            cats = data['laptop_categories']
+            if isinstance(cats, list):
+                prefs.laptop_categories = ','.join(cats)
+            else:
+                prefs.laptop_categories = str(cats)
+        
+        if 'weights' in data:
+            weights = data['weights']
+            if 'price' in weights:
+                prefs.weight_price = float(weights['price'])
+            if 'specs' in weights:
+                prefs.weight_specs = float(weights['specs'])
+            if 'brand' in weights:
+                prefs.weight_brand = float(weights['brand'])
+        
+        db.session.commit()
+        
+        return jsonify({
+            'data': prefs.to_dict(),
+            'message': 'Preferences saved successfully'
+        })
+    
+    @app.route('/api/v1/items/must-see', methods=['GET'])
+    @app.route('/api/v1/items/must-see/', methods=['GET'])
+    def get_must_see_items():
+        """
+        Get high-value items with score >= 75%.
+        
+        Headers:
+            X-Sync-Code: User's sync code.
+        
+        Query Parameters:
+            limit (int): Max items to return (default: 20).
+        
+        Returns:
+            JSON response with must-see listings and their scores.
+        """
+        from models import UserPreferences, ItemAnalysis, LearnedPreference, BrandAffinity
+        from scoring_engine import score_listing
+        
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        limit = request.args.get('limit', 20, type=int)
+        
+        # Get user preferences
+        prefs = UserPreferences.query.filter_by(sync_code=sync_code).first()
+        if not prefs:
+            return jsonify({
+                'data': [],
+                'message': 'No preferences set. Configure preferences first.'
+            })
+        
+        # Get learned data
+        learned_keywords = {
+            lp.keyword: lp.learned_weight 
+            for lp in LearnedPreference.query.filter_by(sync_code=sync_code).all()
+        }
+        brand_affinities = {
+            ba.brand: ba.affinity_score 
+            for ba in BrandAffinity.query.filter_by(sync_code=sync_code).all()
+        }
+        
+        # Check for cached analyses
+        cached = ItemAnalysis.query.filter_by(
+            sync_code=sync_code,
+            classification='must_see'
+        ).order_by(ItemAnalysis.total_score.desc()).limit(limit).all()
+        
+        if cached:
+            # Return cached results with listings
+            results = []
+            for analysis in cached:
+                if analysis.listing:
+                    listing_dict = analysis.listing.to_dict()
+                    listing_dict['match_score'] = analysis.to_dict()
+                    results.append(listing_dict)
+            return jsonify({'data': results})
+        
+        # Calculate scores on-the-fly
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=2)
+        listings = Listing.query.filter(Listing.posted_at >= cutoff).all()
+        
+        results = []
+        for listing in listings:
+            score_data = score_listing(listing, prefs, learned_keywords, brand_affinities)
+            if score_data['classification'] == 'must_see':
+                # Cache the score
+                analysis = ItemAnalysis.query.filter_by(
+                    listing_id=listing.id, sync_code=sync_code
+                ).first()
+                if not analysis:
+                    analysis = ItemAnalysis(listing_id=listing.id, sync_code=sync_code)
+                    db.session.add(analysis)
+                
+                analysis.keyword_score = score_data['keyword_score']
+                analysis.price_score = score_data['price_score']
+                analysis.brand_score = score_data['brand_score']
+                analysis.learned_bonus = score_data['learned_bonus']
+                analysis.total_score = score_data['total_score']
+                analysis.classification = score_data['classification']
+                analysis.analyzed_at = datetime.utcnow()
+                
+                listing_dict = listing.to_dict()
+                listing_dict['match_score'] = score_data
+                results.append(listing_dict)
+        
+        db.session.commit()
+        
+        # Sort by score and limit
+        results.sort(key=lambda x: x['match_score']['total_score'], reverse=True)
+        return jsonify({'data': results[:limit]})
+    
+    @app.route('/api/v1/items/recommended', methods=['GET'])
+    @app.route('/api/v1/items/recommended/', methods=['GET'])
+    def get_recommended_items():
+        """
+        Get recommended items with score 50-74%.
+        
+        Headers:
+            X-Sync-Code: User's sync code.
+        
+        Query Parameters:
+            limit (int): Max items to return (default: 20).
+        
+        Returns:
+            JSON response with recommended listings and their scores.
+        """
+        from models import UserPreferences, ItemAnalysis, LearnedPreference, BrandAffinity
+        from scoring_engine import score_listing
+        
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        limit = request.args.get('limit', 20, type=int)
+        
+        prefs = UserPreferences.query.filter_by(sync_code=sync_code).first()
+        if not prefs:
+            return jsonify({
+                'data': [],
+                'message': 'No preferences set. Configure preferences first.'
+            })
+        
+        # Get learned data
+        learned_keywords = {
+            lp.keyword: lp.learned_weight 
+            for lp in LearnedPreference.query.filter_by(sync_code=sync_code).all()
+        }
+        brand_affinities = {
+            ba.brand: ba.affinity_score 
+            for ba in BrandAffinity.query.filter_by(sync_code=sync_code).all()
+        }
+        
+        # Check for cached analyses
+        cached = ItemAnalysis.query.filter_by(
+            sync_code=sync_code,
+            classification='recommended'
+        ).order_by(ItemAnalysis.total_score.desc()).limit(limit).all()
+        
+        if cached:
+            results = []
+            for analysis in cached:
+                if analysis.listing:
+                    listing_dict = analysis.listing.to_dict()
+                    listing_dict['match_score'] = analysis.to_dict()
+                    results.append(listing_dict)
+            return jsonify({'data': results})
+        
+        # Calculate scores on-the-fly
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=2)
+        listings = Listing.query.filter(Listing.posted_at >= cutoff).all()
+        
+        results = []
+        for listing in listings:
+            score_data = score_listing(listing, prefs, learned_keywords, brand_affinities)
+            if score_data['classification'] == 'recommended':
+                # Cache the score
+                analysis = ItemAnalysis.query.filter_by(
+                    listing_id=listing.id, sync_code=sync_code
+                ).first()
+                if not analysis:
+                    analysis = ItemAnalysis(listing_id=listing.id, sync_code=sync_code)
+                    db.session.add(analysis)
+                
+                analysis.keyword_score = score_data['keyword_score']
+                analysis.price_score = score_data['price_score']
+                analysis.brand_score = score_data['brand_score']
+                analysis.learned_bonus = score_data['learned_bonus']
+                analysis.total_score = score_data['total_score']
+                analysis.classification = score_data['classification']
+                analysis.analyzed_at = datetime.utcnow()
+                
+                listing_dict = listing.to_dict()
+                listing_dict['match_score'] = score_data
+                results.append(listing_dict)
+        
+        db.session.commit()
+        
+        results.sort(key=lambda x: x['match_score']['total_score'], reverse=True)
+        return jsonify({'data': results[:limit]})
+    
+    @app.route('/api/v1/interactions', methods=['POST'])
+    def log_interaction():
+        """
+        Log a user interaction for ML learning.
+        
+        Headers:
+            X-Sync-Code: User's sync code.
+        
+        Request Body (JSON):
+            listing_id (int): ID of the listing.
+            action_type (str): 'view', 'click', 'save', 'dismiss', 'contact'.
+            duration_seconds (int): Optional time spent (for views).
+        
+        Returns:
+            JSON response confirming the interaction.
+        """
+        from models import UserInteraction, LearnedPreference, BrandAffinity
+        
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        data = request.get_json() or {}
+        listing_id = data.get('listing_id')
+        action_type = data.get('action_type', '').strip().lower()
+        duration_seconds = data.get('duration_seconds')
+        
+        if not listing_id:
+            return jsonify({'error': 'listing_id is required'}), 400
+        
+        valid_actions = {'view', 'click', 'save', 'dismiss', 'contact'}
+        if action_type not in valid_actions:
+            return jsonify({'error': f'action_type must be one of: {valid_actions}'}), 400
+        
+        # Check listing exists
+        listing = Listing.query.get(listing_id)
+        if not listing:
+            return jsonify({'error': 'Listing not found'}), 404
+        
+        # Log interaction
+        interaction = UserInteraction(
+            sync_code=sync_code,
+            listing_id=listing_id,
+            action_type=action_type,
+            duration_seconds=duration_seconds
+        )
+        db.session.add(interaction)
+        
+        # Update learned preferences based on action
+        weight_adjustment = {
+            'view': 0.01,
+            'click': 0.05,
+            'save': 0.15,
+            'dismiss': -0.10,
+            'contact': 0.25,
+        }.get(action_type, 0)
+        
+        if weight_adjustment != 0:
+            # Extract keywords from listing and adjust learned weights
+            from tag_extractor import extract_tags
+            tags = extract_tags(listing.title, listing.description)
+            
+            for category, value in tags:
+                # Update learned preference for this keyword
+                learned = LearnedPreference.query.filter_by(
+                    sync_code=sync_code, keyword=value
+                ).first()
+                if not learned:
+                    learned = LearnedPreference(
+                        sync_code=sync_code, 
+                        keyword=value,
+                        learned_weight=0.0,
+                        interaction_count=0
+                    )
+                    db.session.add(learned)
+                
+                # Handle None values (shouldn't happen but safety check)
+                current_weight = learned.learned_weight or 0.0
+                learned.learned_weight = current_weight + weight_adjustment
+                learned.interaction_count = (learned.interaction_count or 0) + 1
+                
+                # Update brand affinity if this is a brand tag
+                if category == 'brand':
+                    affinity = BrandAffinity.query.filter_by(
+                        sync_code=sync_code, brand=value
+                    ).first()
+                    if not affinity:
+                        affinity = BrandAffinity(
+                            sync_code=sync_code, 
+                            brand=value,
+                            affinity_score=0.0,
+                            interaction_count=0
+                        )
+                        db.session.add(affinity)
+                    
+                    # Handle None and clamp affinity between -1 and 1
+                    current_affinity = affinity.affinity_score or 0.0
+                    affinity.affinity_score = max(-1, min(1, current_affinity + weight_adjustment))
+                    affinity.interaction_count = (affinity.interaction_count or 0) + 1
+        
+        db.session.commit()
+        
+        return jsonify({
+            'data': interaction.to_dict(),
+            'message': 'Interaction logged successfully'
+        }), 201
+    
+    @app.route('/api/v1/learned-profile', methods=['GET'])
+    def get_learned_profile():
+        """
+        Get the user's learned preferences (ML-adjusted weights).
+        
+        Headers:
+            X-Sync-Code: User's sync code.
+        
+        Returns:
+            JSON response with learned keyword weights and brand affinities.
+        """
+        from models import LearnedPreference, BrandAffinity
+        
+        sync_code = request.headers.get('X-Sync-Code', '').strip()
+        if not sync_code:
+            return jsonify({'error': 'X-Sync-Code header is required'}), 400
+        
+        learned_prefs = LearnedPreference.query.filter_by(sync_code=sync_code).order_by(
+            LearnedPreference.learned_weight.desc()
+        ).limit(50).all()
+        
+        brand_affs = BrandAffinity.query.filter_by(sync_code=sync_code).order_by(
+            BrandAffinity.affinity_score.desc()
+        ).all()
+        
+        return jsonify({
+            'data': {
+                'learned_keywords': [
+                    {
+                        'keyword': lp.keyword,
+                        'weight': round(lp.learned_weight, 3),
+                        'interactions': lp.interaction_count
+                    }
+                    for lp in learned_prefs
+                ],
+                'brand_affinities': [
+                    {
+                        'brand': ba.brand,
+                        'affinity': round(ba.affinity_score, 3),
+                        'interactions': ba.interaction_count
+                    }
+                    for ba in brand_affs
+                ]
+            }
+        })
+    
     # Error handlers
     @app.errorhandler(400)
     def bad_request(error):

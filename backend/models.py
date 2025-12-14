@@ -422,3 +422,218 @@ class ScraperJob(db.Model):
             'progress_json': self.progress_json,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+# =============================================================================
+# AI Recommendation Engine Models
+# =============================================================================
+
+class UserPreferences(db.Model):
+    """
+    Explicit user-defined search criteria for laptop recommendations.
+    
+    Uses sync_code as pseudo-user ID (no auth system yet).
+    
+    Attributes:
+        sync_code: Unique identifier for the user (from archive sync feature).
+        keywords: Comma-separated keywords to prioritize (e.g., "thinkpad,16gb,ssd").
+        min_price: Minimum price filter in EUR cents.
+        max_price: Maximum price filter in EUR cents.
+        brands: Comma-separated preferred brands.
+        weight_price: Importance of price in scoring (0.0-1.0).
+        weight_specs: Importance of specs/keywords in scoring (0.0-1.0).
+        weight_brand: Importance of brand in scoring (0.0-1.0).
+    """
+    
+    __tablename__ = 'user_preferences'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    sync_code = db.Column(db.String(8), unique=True, nullable=False, index=True)
+    keywords = db.Column(db.Text, nullable=True)  # comma-separated
+    min_price = db.Column(db.Integer, nullable=True)  # cents
+    max_price = db.Column(db.Integer, nullable=True)  # cents
+    brands = db.Column(db.Text, nullable=True)  # comma-separated
+    laptop_categories = db.Column(db.Text, nullable=True)  # gaming,business,ultrabook
+    weight_price = db.Column(db.Float, default=0.3, nullable=False)
+    weight_specs = db.Column(db.Float, default=0.4, nullable=False)
+    weight_brand = db.Column(db.Float, default=0.3, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self) -> str:
+        return f'<UserPreferences sync={self.sync_code}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert preferences to dictionary for API responses."""
+        return {
+            'sync_code': self.sync_code,
+            'keywords': [k.strip() for k in (self.keywords or '').split(',') if k.strip()],
+            'min_price': self.min_price / 100 if self.min_price else None,
+            'max_price': self.max_price / 100 if self.max_price else None,
+            'brands': [b.strip() for b in (self.brands or '').split(',') if b.strip()],
+            'laptop_categories': [c.strip() for c in (self.laptop_categories or '').split(',') if c.strip()],
+            'weights': {
+                'price': self.weight_price,
+                'specs': self.weight_specs,
+                'brand': self.weight_brand,
+            },
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ItemAnalysis(db.Model):
+    """
+    Pre-computed recommendation scores for each listing per user.
+    
+    Stored per (listing_id, sync_code) pair so each user gets personalized scores.
+    
+    Attributes:
+        listing_id: Foreign key to the analyzed listing.
+        sync_code: User identifier for personalized scoring.
+        keyword_score: Match score for keywords (0-100).
+        price_score: Score based on price fit (0-100).
+        brand_score: Match score for preferred brands (0-100).
+        learned_bonus: Adjustment from ML learning (can be negative).
+        total_score: Weighted final score (0-100).
+        classification: Category: 'must_see', 'recommended', or 'browse'.
+    """
+    
+    __tablename__ = 'items_analysis'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    listing_id = db.Column(db.Integer, db.ForeignKey('listings.id', ondelete='CASCADE'), nullable=False, index=True)
+    sync_code = db.Column(db.String(8), nullable=False, index=True)
+    keyword_score = db.Column(db.Float, default=0.0)
+    price_score = db.Column(db.Float, default=0.0)
+    brand_score = db.Column(db.Float, default=0.0)
+    learned_bonus = db.Column(db.Float, default=0.0)
+    total_score = db.Column(db.Float, default=0.0, index=True)
+    classification = db.Column(db.String(20), index=True)  # must_see, recommended, browse
+    analyzed_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('listing_id', 'sync_code', name='uq_item_analysis_listing_user'),
+        db.Index('ix_items_analysis_score', 'sync_code', 'classification', 'total_score'),
+    )
+    
+    # Relationship to listing
+    listing = db.relationship('Listing', backref=db.backref('analyses', lazy='dynamic', cascade='all, delete-orphan'))
+    
+    def __repr__(self) -> str:
+        return f'<ItemAnalysis listing={self.listing_id} score={self.total_score:.1f}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert analysis to dictionary for API responses."""
+        return {
+            'listing_id': self.listing_id,
+            'keyword_score': round(self.keyword_score, 1),
+            'price_score': round(self.price_score, 1),
+            'brand_score': round(self.brand_score, 1),
+            'learned_bonus': round(self.learned_bonus, 1),
+            'total_score': round(self.total_score, 1),
+            'classification': self.classification,
+            'analyzed_at': self.analyzed_at.isoformat() if self.analyzed_at else None,
+        }
+
+
+class UserInteraction(db.Model):
+    """
+    Track user interactions for machine learning feedback loop.
+    
+    Records views, clicks, saves, dismisses, and contact actions
+    to learn user preferences over time.
+    
+    Attributes:
+        sync_code: User identifier.
+        listing_id: The listing that was interacted with.
+        action_type: Type of interaction (view, click, save, dismiss, contact).
+        duration_seconds: Time spent viewing (for view actions).
+    """
+    
+    __tablename__ = 'user_interactions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    sync_code = db.Column(db.String(8), nullable=False, index=True)
+    listing_id = db.Column(db.Integer, db.ForeignKey('listings.id', ondelete='CASCADE'), nullable=False, index=True)
+    action_type = db.Column(db.String(20), nullable=False)  # view, click, save, dismiss, contact
+    duration_seconds = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    
+    # Relationship to listing
+    listing = db.relationship('Listing', backref=db.backref('interactions', lazy='dynamic'))
+    
+    def __repr__(self) -> str:
+        return f'<UserInteraction {self.action_type} listing={self.listing_id}>'
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert interaction to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'listing_id': self.listing_id,
+            'action_type': self.action_type,
+            'duration_seconds': self.duration_seconds,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class LearnedPreference(db.Model):
+    """
+    Machine-learned keyword weights adjusted from user behavior.
+    
+    Tracks how keyword relevance changes based on which items
+    users save, dismiss, or spend time viewing.
+    
+    Attributes:
+        sync_code: User identifier.
+        keyword: The keyword being tracked.
+        learned_weight: Adjustment factor (positive = more relevant, negative = less).
+        interaction_count: Number of interactions that influenced this weight.
+    """
+    
+    __tablename__ = 'learned_preferences'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    sync_code = db.Column(db.String(8), nullable=False, index=True)
+    keyword = db.Column(db.String(100), nullable=False)
+    learned_weight = db.Column(db.Float, default=0.0)
+    interaction_count = db.Column(db.Integer, default=0)
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('sync_code', 'keyword', name='uq_learned_pref_user_keyword'),
+    )
+    
+    def __repr__(self) -> str:
+        return f'<LearnedPreference {self.keyword}={self.learned_weight:.2f}>'
+
+
+class BrandAffinity(db.Model):
+    """
+    Learned brand preferences from user behavior.
+    
+    Tracks which brands users prefer based on their interactions.
+    
+    Attributes:
+        sync_code: User identifier.
+        brand: Brand name.
+        affinity_score: Score from -1.0 (dislike) to +1.0 (strong preference).
+        interaction_count: Number of interactions that influenced this score.
+    """
+    
+    __tablename__ = 'brand_affinity'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    sync_code = db.Column(db.String(8), nullable=False, index=True)
+    brand = db.Column(db.String(50), nullable=False)
+    affinity_score = db.Column(db.Float, default=0.0)
+    interaction_count = db.Column(db.Integer, default=0)
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        db.UniqueConstraint('sync_code', 'brand', name='uq_brand_affinity_user_brand'),
+    )
+    
+    def __repr__(self) -> str:
+        return f'<BrandAffinity {self.brand}={self.affinity_score:.2f}>'
+
